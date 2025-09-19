@@ -1,0 +1,21 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+
+# Django DB / secrets
+*.sqlite3
+*.log
+.env
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# VSCode / PyCharm
+.vscode/
+.idea/
+
+# Mac-specific files
+.DS_Store
