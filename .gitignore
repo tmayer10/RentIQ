@@ -19,3 +19,7 @@ env/
 
 # Mac-specific files
 .DS_Store
+
+# Front-end packages
+/node_modules
+package-lock.json
