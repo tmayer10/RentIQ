@@ -37,6 +37,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'app',  # Add your app here
 ]
 
 MIDDLEWARE = [
@@ -75,8 +76,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'rentiq_db',
+        'USER': 'rentiq_user',
+        'PASSWORD': 'your_password_here',  # need to update this when i create table
+        'HOST': 'localhost',  # Use 'localhost' for local dev, RDS endpoint for production
+        'PORT': '5432',
     }
 }
 
