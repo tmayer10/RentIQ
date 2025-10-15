@@ -13,6 +13,15 @@ ENV/
 env/
 .venv/
 
+# Environment variables
+.env
+*.env
+!.env.example
+
+# Docker
+*.log
+.docker/
+
 # VSCode / PyCharm
 .vscode/
 .idea/

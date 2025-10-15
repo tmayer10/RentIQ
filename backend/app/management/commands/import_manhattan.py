@@ -12,12 +12,11 @@ from datetime import datetime
 class Command(BaseCommand):
     help = """Import Manhattan listings from StreetEasy from JSON file, will likely
     resuse this file when we have to update the database with new listings from streeteasy"""
-
-    def add_arguments(self, parser):
+    def add_arguments(self, parser):  
         parser.add_argument(
-            '--file', # aka which file to import
-            type=str, # then some more args about the files
-            default='../../../EDA/Datasets/StreetEasy/manhattan_details.json',
+            '--file',
+            type=str,
+            default='/data/EDA/Datasets/StreetEasy/manhattan_details.json',  # Updated path
             help='Path to the JSON file to import'
         )
         parser.add_argument(
