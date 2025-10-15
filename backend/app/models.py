@@ -2,6 +2,28 @@ from django.db import models
 from django.contrib.postgres.fields import ArrayField
 from django.core.validators import MinValueValidator
 
+"""
+Big Idea: Normalized database design instead of a single massive table
+- five smaller tables instead of a single massive table
+    - Table 1: Building
+        - main entity for the database, hosts each apartment listing
+        - stores information about the building, including the address, borough, neighborhood, zipcode, latitude, longitude, and built_in year
+    - Table 2: Listing: avoid duplicating building data across multiple listings
+        - whether it's the same building id and many different rooms, same year built, etc
+        - saves a ton of space which may save $ for us in AWS RDS
+        - better and faster queries too
+    - Table 3: SubwayStation
+        - resuable Subway station data since so many will use the same subway station in manhattan (or line)
+        - ie almost every apartment on the west side will use the 1/2/3 train
+        - saves time and space if someone asks to be near the A/C/E train
+    - Table 4: ListingSubway
+        - connect listings to subway stations with distance data
+        - this way, can calculate distances between listings and subway stations
+        - store distance per listing-station pair
+    - Table 5: UserS
+
+"""
+
 
 class Building(models.Model):
     """
@@ -204,23 +226,3 @@ class ListingSubway(models.Model):
     
     def __str__(self):
         return f"{self.listing.address} - {self.subway.line} ({self.distance}mi)"
-
-
-class UserSearch(models.Model):
-    """
-    Track user searches for analytics and improvement
-    """
-    query = models.TextField()
-    results_count = models.IntegerField(default=0)
-    filters_applied = models.JSONField(default=dict, blank=True)
-    timestamp = models.DateTimeField(auto_now_add=True)
-    
-    # Optional: link to authenticated user if implementing auth
-    # user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
-    
-    class Meta:
-        db_table = 'user_searches'
-        ordering = ['-timestamp']
-    
-    def __str__(self):
-        return f"Search: {self.query[:50]} ({self.timestamp})"

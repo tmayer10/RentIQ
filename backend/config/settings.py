@@ -37,11 +37,13 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'app',  # Add your app here
+    'corsheaders',  # Add this
+    'app',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # Add this (must be before CommonMiddleware)
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -79,8 +81,8 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'rentiq_db',
         'USER': 'rentiq_user',
-        'PASSWORD': 'your_password_here',  # need to update this when i create table
-        'HOST': 'localhost',  # Use 'localhost' for local dev, RDS endpoint for production
+        'PASSWORD': 'RentIQ2025!',  # password stored here
+        'HOST': 'localhost',
         'PORT': '5432',
     }
 }
@@ -126,3 +128,31 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# CORS Configuration - added on 10.15 for react app to access API
+# For development - allows requests from React dev server
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",      # React (create-react-app)
+    "http://localhost:5173",      # Vite (ts-frontend)
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+
+# Alternative: Allow all origins during development (LESS SECURE)
+# CORS_ALLOW_ALL_ORIGINS = True  # Only use this for quick testing!
+
+# Allow credentials (cookies, authorization headers)
+CORS_ALLOW_CREDENTIALS = True
+
+# Additional CORS settings
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]

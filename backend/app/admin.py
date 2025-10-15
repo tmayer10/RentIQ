@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Building, Listing, SubwayStation, ListingSubway, UserSearch
+from .models import Building, Listing, SubwayStation, ListingSubway
 
 
 @admin.register(Building)
@@ -69,13 +69,3 @@ class ListingSubwayAdmin(admin.ModelAdmin):
     list_filter = ['subway__line']
     search_fields = ['listing__address']
 
-
-@admin.register(UserSearch)
-class UserSearchAdmin(admin.ModelAdmin):
-    list_display = ['query_preview', 'results_count', 'timestamp']
-    list_filter = ['timestamp']
-    readonly_fields = ['timestamp']
-    
-    def query_preview(self, obj):
-        return obj.query[:100]
-    query_preview.short_description = 'Query'
