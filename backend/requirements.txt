@@ -4,3 +4,11 @@ sqlparse==0.5.3
 typing-extensions==4.13.2
 psycopg2-binary==2.9.9
 django-cors-headers==4.3.1
+python-dotenv
+psycopg2
+pinecone>=3.0.0  # new Pinecone SDK
+openai
+sentence-transformers
+transformers
+torch
+streamlit

@@ -1,0 +1,112 @@
+# vectorstore.py
+import os
+from pinecone import Pinecone, ServerlessSpec
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModelForSequenceClassification
+import torch
+from utils import build_text, sanitize_metadata, deduplicate_matches
+from dotenv import load_dotenv
+
+load_dotenv()
+
+INDEX_DIM = 384
+
+# Dense model
+dense_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Sparse (SPLADE) model
+splade_model_name = "naver/splade-cocondenser-ensembledistil"
+splade_tokenizer = AutoTokenizer.from_pretrained(splade_model_name)
+splade_model = AutoModelForMaskedLM.from_pretrained(splade_model_name)
+
+# Reranker model
+rerank_model_name = "BAAI/bge-reranker-v2-m3"
+rerank_tokenizer = AutoTokenizer.from_pretrained(rerank_model_name)
+rerank_model = AutoModelForSequenceClassification.from_pretrained(rerank_model_name)
+
+def splade_encode(text: str):
+    inputs = splade_tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+    with torch.no_grad():
+        logits = splade_model(**inputs).logits
+    weights = torch.log1p(torch.relu(logits)).max(dim=1).values.squeeze()
+    indices = torch.nonzero(weights, as_tuple=True)[0].tolist()
+    values = weights[indices].tolist()
+    return {"indices": indices, "values": values}
+
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index_name = "listings-index-hybrid"
+
+def get_index():
+    if index_name not in [idx.name for idx in pc.list_indexes()]:
+        pc.create_index(
+            name=index_name,
+            dimension=INDEX_DIM,
+            metric="dotproduct",
+            spec=ServerlessSpec(cloud="aws", region="us-east-1")
+        )
+    return pc.Index(index_name)
+
+def hybrid_search_raw(query_text: str, alpha: float = 0.5, top_k: int = 20, filters: dict = None):
+    dense_q = dense_model.encode(query_text).tolist()
+    sparse_q = splade_encode(query_text)
+
+    beta = 1 - alpha
+    weighted_dense = [v * alpha for v in dense_q]
+    weighted_sparse = {
+        "indices": sparse_q["indices"],
+        "values": [v * beta for v in sparse_q["values"]]
+    }
+
+    query_params = {
+        "vector": weighted_dense,
+        "sparse_vector": weighted_sparse,
+        "top_k": top_k,
+        "include_metadata": True,
+        "include_values" : True
+    }
+    if filters:
+        query_params["filter"] = filters
+
+    results = get_index().query(**query_params)
+    return results.matches
+
+def rerank_results(query: str, matches):
+    """Rerank matches using BGE Reranker."""
+    docs = [m.metadata.get("description", "") for m in matches]
+    pairs = [(query, doc) for doc in docs]
+
+    inputs = rerank_tokenizer(pairs, padding=True, truncation=True, return_tensors="pt")
+    with torch.no_grad():
+        scores = rerank_model(**inputs).logits.squeeze(1)  # Higher = more relevant
+
+    # Attach scores and sort
+    scored_matches = [
+        (match, score.item()) for match, score in zip(matches, scores)
+    ]
+    scored_matches.sort(key=lambda x: x[1], reverse=True)
+
+    # Return sorted matches
+    return scored_matches
+
+def hybrid_search(query_text: str, alpha: float = 0.5, top_k: int = 20, filters: dict = None, rerank: bool = True):
+    # Step 1: Raw hybrid search
+    matches = hybrid_search_raw(query_text, alpha=alpha, top_k=top_k, filters=filters)
+
+    # Step 2: Deduplicate by listing_id
+    matches = deduplicate_matches(matches)
+
+    # Step 3: Optional rerank
+    if rerank:
+        matches_with_scores = rerank_results(query_text, matches)
+        matches = [m for m, _ in matches_with_scores]
+
+    # Final display
+    for match in matches[:5]:  # show top 5 after rerank
+        md = match.metadata
+        print(f"[Score: {match.score:.4f}] ID: {md.get('listing_id')}, "
+              f"${md.get('price')}, {md.get('bedrooms')}BR/{md.get('bathrooms')}BA, "
+              f"{md.get('neighborhood')}, {md.get('borough')}")
+        print(f"Amenities: {md.get('amenities')}")
+        print("-----")
+
+    return matches
