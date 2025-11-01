@@ -16,6 +16,14 @@ if "last_matches" not in st.session_state:
 # Sidebar controls
 top_k = st.sidebar.slider("Number of top listings to consider", min_value=3, max_value=10, value=5)
 
+st.sidebar.markdown("---")
+if st.sidebar.button("🔄 Start New Search", help="Clear conversation history and start fresh"):
+    st.session_state["messages"] = [
+        {"role": "system", "content": "You are RentIQ, a helpful NYC apartment assistant."}
+    ]
+    st.session_state["last_matches"] = []
+    st.rerun()
+
 # Display conversation
 for msg in st.session_state["messages"]:
     if msg["role"] == "system":
@@ -35,7 +43,14 @@ if user_query:
     with st.spinner("Searching and analyzing..."):
         # Provide history excluding the system prolog which is already included in pipeline
         history_for_llm = [m for m in st.session_state["messages"] if m["role"] != "system"]
-        llm_output, matches, clarification = rag_search(user_query, top_k=top_k, chat_history=history_for_llm)
+        prior_assistant_msgs = [m for m in history_for_llm if m["role"] == "assistant"]
+        is_first_turn = len(prior_assistant_msgs) == 0
+        llm_output, matches, clarification = rag_search(
+            user_query,
+            top_k=top_k,
+            chat_history=history_for_llm,
+            is_first_turn=is_first_turn,
+        )
 
     st.session_state["last_matches"] = matches
     st.session_state["messages"].append({"role": "assistant", "content": llm_output})

@@ -67,8 +67,21 @@ def hybrid_search_raw(query_text: str, alpha: float = 0.5, top_k: int = 20, filt
     if filters:
         query_params["filter"] = filters
 
-    results = get_index().query(**query_params)
-    return results.matches
+    try:
+        results = get_index().query(**query_params)
+        return results.matches
+    except Exception as e:
+        # Fallback: retry without filters if filter caused a failure
+        print(f"[WARN] Pinecone query failed with filters: {e}")
+        if "filter" in query_params:
+            try:
+                no_filter_params = dict(query_params)
+                no_filter_params.pop("filter", None)
+                results = get_index().query(**no_filter_params)
+                return results.matches
+            except Exception as e2:
+                print(f"[ERROR] Pinecone query failed without filters as well: {e2}")
+        return []
 
 def rerank_results(query: str, matches):
     """Rerank matches using BGE Reranker."""

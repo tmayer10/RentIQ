@@ -21,7 +21,7 @@ SCHEMA (allowed fields only):
 - bedrooms (integer; use {{"$eq"}} unless a range is given)
 - bathrooms (float; use {{"$eq"}} unless a range is given)
 - sqft (integer)
-- borough (always {{"$eq": "manhattan"}})
+- borough (string; e.g., {{"$eq": "manhattan"}} when specified)
 - neighborhood (string or {{"$in": [..]}})
 - zipcode (string)
 - building_address (string)
@@ -165,9 +165,110 @@ def process_user_query(user_query: str) -> Tuple[Dict[str, Any], Optional[str]]:
     if not filters:
         filters = _fallback_extract_basic_filters(user_query)
 
+    # Normalize to Pinecone-compatible structure
+    filters = _normalize_pinecone_filter(filters)
+
     clarification = None
     minimal_keys = {"price", "bedrooms", "borough", "neighborhood", "amenities", "subway_routes", "subway_min_distance"}
     if not filters or len(set(filters.keys()) & minimal_keys) <= 1:
         clarification = _build_clarification_from_missing(filters)
 
     return filters, clarification
+
+
+def _normalize_pinecone_filter(filters: Dict[str, Any]) -> Dict[str, Any]:
+    """Coerce extracted filters into Pinecone-compatible filter dict.
+    - Lowercase strings
+    - Ensure operators are one of $eq, $lt, $lte, $gt, $gte, $in
+    - Coerce scalars to $eq and lists to $in for array-like fields
+    - Drop unsupported fields
+    """
+    allowed_fields = {
+        "listing_id", "price", "bedrooms", "bathrooms", "sqft",
+        "borough", "neighborhood", "zipcode", "building_address",
+        "amenities", "subway_lines", "subway_routes", "subway_min_distance",
+        "description",
+    }
+
+    def to_lower_str(x: Any) -> str:
+        return str(x).strip().lower()
+
+    def norm_scalar(value: Any):
+        if isinstance(value, str):
+            return {"$eq": to_lower_str(value)}
+        return {"$eq": value}
+
+    def norm_list(value: Any):
+        if isinstance(value, dict) and "$in" in value:
+            vals = value["$in"] if isinstance(value["$in"], list) else [value["$in"]]
+        elif isinstance(value, list):
+            vals = value
+        else:
+            vals = [value]
+        return {"$in": [to_lower_str(v) for v in vals if v is not None]}
+
+    normalized: Dict[str, Any] = {}
+
+    for key, value in filters.items():
+        if key not in allowed_fields:
+            continue
+
+        if key in {"price", "sqft", "bedrooms", "bathrooms"}:
+            if isinstance(value, dict):
+                rng = {}
+                for op in ("$eq", "$lt", "$lte", "$gt", "$gte"):
+                    if op in value and value[op] is not None:
+                        try:
+                            if key in {"price", "sqft", "bathrooms"}:
+                                rng[op] = float(value[op])
+                            else:
+                                rng[op] = int(float(value[op]))
+                        except (ValueError, TypeError):
+                            pass
+                if rng:
+                    normalized[key] = rng
+                    continue
+            normalized[key] = norm_scalar(value)
+            continue
+
+        if key in {"listing_id", "borough", "zipcode", "building_address", "description"}:
+            normalized[key] = norm_scalar(value)
+            continue
+
+        if key == "neighborhood":
+            if isinstance(value, dict) and "$in" in value:
+                normalized[key] = norm_list(value)
+            elif isinstance(value, list):
+                normalized[key] = norm_list(value)
+            else:
+                normalized[key] = norm_scalar(value)
+            continue
+
+        if key in {"amenities", "subway_lines", "subway_routes"}:
+            normalized[key] = norm_list(value)
+            continue
+
+        if key == "subway_min_distance":
+            if isinstance(value, dict):
+                rng = {}
+                for op in ("$lt", "$lte", "$gt", "$gte", "$eq"):
+                    if op in value and value[op] is not None:
+                        try:
+                            rng[op] = float(value[op])
+                        except (ValueError, TypeError):
+                            pass
+                if rng:
+                    normalized[key] = rng
+                else:
+                    try:
+                        normalized[key] = {"$lt": float(value)}
+                    except (ValueError, TypeError):
+                        pass
+            else:
+                try:
+                    normalized[key] = {"$lt": float(value)}
+                except (ValueError, TypeError):
+                    pass
+            continue
+
+    return normalized

@@ -26,6 +26,8 @@ Rules:
 - Include specific constraints like price, bedrooms, bathrooms, neighborhoods/boroughs, amenities, proximity to subway lines/routes when mentioned.
 - When the user mentions landmarks or universities (e.g., nyu, columbia), infer the most likely neighborhoods/areas and include them explicitly.
 - If the user refers to "the first one" or similar, infer attributes (e.g., listing id, neighborhood, price, bedrooms) from the assistant's last reply and include them explicitly.
+- CRITICAL: If the user explicitly replaces/changes a constraint (e.g., "change to 1br", "actually make it $4000", "switch to Manhattan"), REPLACE the old value with the new one. Do NOT keep both.
+- If the user adds new constraints without replacing (e.g., "also needs elevator"), merge them.
 - Do not include instructions to the assistant, only the search query content.
 
 Conversation history (most recent first):
