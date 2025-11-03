@@ -62,6 +62,7 @@ def ingest_listings():
                     subway_dist_map[key] = float(dist)
 
         subway_dist_list = [f"{key}:{dist}" for key, dist in subway_dist_map.items()]
+        subway_min_distance = min(subway_dist_map.values()) if subway_dist_map else None
 
         # --- Metadata ---
         metadata = sanitize_metadata({
@@ -80,6 +81,7 @@ def ingest_listings():
             "subway_info": subway_info,
             "subway_lines": [line.lower() for line in subway_lines if line],
             "subway_routes": [route.lower() for route in subway_routes if route],
+            "subway_min_distance": subway_min_distance,
             # You can enable subway_distances later for numeric filtering
             "description": description
         })
