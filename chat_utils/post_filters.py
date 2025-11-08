@@ -6,6 +6,7 @@ These filters are applied AFTER Pinecone retrieval to enable more nuanced, LLM-a
 
 import os
 import re
+import asyncio
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -14,6 +15,9 @@ from allowable_values import (
     AMENITIES, NEIGHBORHOODS, SUBWAY_ROUTES, SUBWAY_LINES,
     AMENITY_SYNONYMS, NEIGHBORHOOD_ALIASES
 )
+from rate_limiter import call_llm_with_limit
+from google import genai
+from google.genai import types
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -52,7 +56,7 @@ class SubwayPreferencesResponse(BaseModel):
     )
 
 
-def parse_amenities(user_query: str) -> List[str]:
+async def parse_amenities(user_query: str) -> List[str]:
     """
     Extract amenity requirements from user query and map to canonical amenity list.
     Uses Pydantic-enforced structured output for robust parsing.
@@ -84,15 +88,25 @@ User query: "{user_query}"
 
 Extract amenities:"""
 
+    #messages = [{"role": "user", "content": prompt}]
+
     try:
-        completion = client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format=AmenitiesResponse,
-            temperature=0
-        )
-        
-        parsed = completion.choices[0].message.parsed
+        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+        # Run synchronously in a thread so async code can await
+        response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                system_instruction ="""You are an expert at extracting structured data from user queries.
+                You always respond with valid JSON that adheres to the provided schema.""",
+                response_mime_type="application/json",
+                response_schema= AmenitiesResponse,
+                ),
+            )
+
+        # `response.parsed` is already a NeighborhoodsResponse object
+        parsed = response.parsed
         
         # Validate: only keep items that are in the canonical list
         validated = [a for a in parsed.amenities if a in AMENITIES]
@@ -127,7 +141,7 @@ def _fallback_parse_amenities(user_query: str) -> List[str]:
     return list(found)
 
 
-def parse_neighborhoods(user_query: str) -> List[str]:
+async def parse_neighborhoods(user_query: str) -> List[str]:
     """
     Extract neighborhood preferences from user query and map to canonical neighborhood list.
     Uses Pydantic-enforced structured output. Handles landmarks (NYU -> East Village).
@@ -160,15 +174,25 @@ User query: "{user_query}"
 
 Extract neighborhoods:"""
 
+    #messages = [{"role": "user", "content": prompt}]
+
     try:
-        completion = client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format=NeighborhoodsResponse,
-            temperature=0
-        )
-        
-        parsed = completion.choices[0].message.parsed
+        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+        # Run synchronously in a thread so async code can await
+        response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                system_instruction ="""You are an expert at extracting structured data from user queries.
+                You always respond with valid JSON that adheres to the provided schema.""",
+                response_mime_type="application/json",
+                response_schema= NeighborhoodsResponse,
+                ),
+            )
+
+        # `response.parsed` is already a NeighborhoodsResponse object
+        parsed = response.parsed
         
         # Validate
         validated = [n for n in parsed.neighborhoods if n in NEIGHBORHOODS]
@@ -204,7 +228,7 @@ def _fallback_parse_neighborhoods(user_query: str) -> List[str]:
     return list(found)
 
 
-def parse_subway_preferences(user_query: str) -> Dict[str, Any]:
+async def parse_subway_preferences(user_query: str) -> Dict[str, Any]:
     """
     Extract subway route/line preferences and distance constraints.
     Uses Pydantic-enforced structured output.
@@ -237,16 +261,26 @@ User query: "{user_query}"
 
 Extract subway preferences:"""
 
+    #messages = [{"role": "user", "content": prompt}]
+
     try:
-        completion = client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format=SubwayPreferencesResponse,
-            temperature=0
-        )
-        
-        parsed = completion.choices[0].message.parsed
-        
+        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+        # Run synchronously in a thread so async code can await
+        response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                system_instruction ="""You are an expert at extracting structured data from user queries.
+                You always respond with valid JSON that adheres to the provided schema.""",
+                response_mime_type="application/json",
+                response_schema= SubwayPreferencesResponse,
+                ),
+            )
+
+        # `response.parsed` is already a NeighborhoodsResponse object
+        parsed = response.parsed
+       
         # Validate and normalize
         result = {
             "routes": [r.lower() for r in parsed.routes if r.lower() in SUBWAY_ROUTES],
@@ -297,80 +331,195 @@ def _fallback_parse_subway(user_query: str) -> Dict[str, Any]:
         "max_distance": max_distance
     }
 
-
-def apply_post_retrieval_filters(
-    matches: List[Any],
-    user_query: str,
+def build_pinecone_filter(
     amenities: Optional[List[str]] = None,
     neighborhoods: Optional[List[str]] = None,
-    subway_prefs: Optional[Dict[str, Any]] = None
-) -> List[Any]:
-    """
-    Apply post-retrieval filters to Pinecone matches.
-    
-    Args:
-        matches: List of Pinecone match objects with .metadata
-        user_query: Original user query (for logging/fallback)
-        amenities: Parsed amenity requirements (if None, will parse from query)
-        neighborhoods: Parsed neighborhood preferences (if None, will parse from query)
-        subway_prefs: Parsed subway preferences (if None, will parse from query)
-    
-    Returns:
-        Filtered list of matches
-    """
-    # Parse if not provided
-    if amenities is None:
-        amenities = parse_amenities(user_query)
-    if neighborhoods is None:
-        neighborhoods = parse_neighborhoods(user_query)
-    if subway_prefs is None:
-        subway_prefs = parse_subway_preferences(user_query)
-    
-    filtered = []
-    
-    for match in matches:
-        md = match.metadata
-        
-        # Neighborhood filter
-        if neighborhoods:
-            listing_neighborhood = md.get("neighborhood", "").lower()
-            if listing_neighborhood not in neighborhoods:
-                continue
-        
-        # Amenity filter (ALL required amenities must be present)
-        if amenities:
-            listing_amenities = [a.lower() for a in md.get("amenities", [])]
-            if not all(req_amenity in listing_amenities for req_amenity in amenities):
-                continue
-        
-        # Subway filter
-        if subway_prefs.get("routes") or subway_prefs.get("lines"):
-            listing_routes = [r.lower() for r in md.get("subway_routes", [])]
-            listing_lines = [l.lower() for l in md.get("subway_lines", [])]
-            
-            route_match = (
-                not subway_prefs.get("routes") or
-                any(r in listing_routes for r in subway_prefs["routes"])
-            )
-            line_match = (
-                not subway_prefs.get("lines") or
-                any(l in listing_lines for l in subway_prefs["lines"])
-            )
-            
-            if not (route_match and line_match):
-                continue
-        
-        # Subway distance filter
-        if subway_prefs.get("max_distance") is not None:
-            listing_min_dist = md.get("subway_min_distance")
-            if listing_min_dist is None or listing_min_dist > subway_prefs["max_distance"]:
-                continue
-        
-        # Passed all filters
-        filtered.append(match)
-    
-    print(f"[INFO] Post-filter: {len(matches)} -> {len(filtered)} matches")
-    print(f"[INFO] Filters applied: amenities={amenities}, neighborhoods={neighborhoods}, subway={subway_prefs}")
-    
-    return filtered
+    subway_prefs: Optional[Dict[str, Any]] = None):
+    filter_dict = {}
 
+    # Amenities: list stored in metadata, query with $in
+    if amenities:
+        filter_dict["amenities"] = {"$in": [a.lower() for a in amenities]}
+
+    # Neighborhood: stored as single string, still query with $in
+    if neighborhoods:
+        filter_dict["neighborhood"] = {"$in": [n.lower() for n in neighborhoods]}
+
+    # Subway line/route filters: lists in metadata
+    if subway_prefs.get("lines"):
+        filter_dict["subway_lines"] = {"$in": [line.lower() for line in subway_prefs["lines"]]}
+    if subway_prefs.get("routes"):
+        filter_dict["subway_routes"] = {"$in": [route.lower() for route in subway_prefs["routes"]]}
+
+    # Max distance filter: stored as float
+    if subway_prefs.get("max_distance") is not None:
+        filter_dict["subway_min_distance"] = {"$lte": float(subway_prefs["max_distance"])}
+
+    return filter_dict
+
+def build_pinecone_filter(amenities, neighborhoods, subway_prefs):
+    filter_dict = {}
+
+    # Amenities: list stored in metadata, query with $in
+    if amenities:
+        filter_dict["amenities"] = {"$in": [a.lower() for a in amenities]}
+
+    # Neighborhood: stored as single string, still query with $in
+    if neighborhoods:
+        filter_dict["neighborhood"] = {"$in": [n.lower() for n in neighborhoods]}
+
+    # Subway line/route filters: lists in metadata
+    if subway_prefs.get("lines"):
+        filter_dict["subway_lines"] = {"$in": [line.lower() for line in subway_prefs["lines"]]}
+    if subway_prefs.get("routes"):
+        filter_dict["subway_routes"] = {"$in": [route.lower() for route in subway_prefs["routes"]]}
+
+    # Max distance filter: stored as float
+    if subway_prefs.get("max_distance") is not None:
+        filter_dict["subway_min_distance"] = {"$lte": float(subway_prefs["max_distance"])}
+
+    return filter_dict
+
+def combine_soft_with_hard(soft_filters: dict, hard_filters: dict):
+    """
+    Create filter dictionaries that combine exactly one soft filter key 
+    with all hard filters.
+
+    Args:
+        soft_filters (dict): Dict of flexible (soft) filters.
+        hard_filters (dict): Dict of strict (hard) filters.
+
+    Returns:
+        list[dict]: List of combined filter dicts.
+    """
+    combined_filters_list = []
+
+    for key, value in soft_filters.items():
+        # Start with hard filters
+        combined = {**hard_filters}
+
+        # Add just one soft filter key/value
+        combined[key] = value
+
+        combined_filters_list.append(combined)
+
+    return combined_filters_list
+
+async def apply_post_retrieval_filters(
+    matches: List[Any],
+    user_query: str,
+    hard_filters: Dict[str, Any],
+    amenities: Optional[List[str]] = None,
+    neighborhoods: Optional[List[str]] = None,
+    subway_prefs: Optional[Dict[str, Any]] = None,
+    boost_weight: float = 1.0
+) -> List[Dict[str, Any]]:
+    """
+    Post-retrieval filter + scoring applied to Pinecone matches.
+
+    Hard filters = must match (from user query preferences)
+    Soft filters = nice-to-have, boost score if matched.
+
+    Returns:
+        List of dicts: {
+          id,
+          metadata,
+          pinecone_score,
+          boost_score,
+          combined_score
+        }
+    """
+
+    # --- Parse filters if not provided ---
+    if amenities is None:
+        amenities = await parse_amenities(user_query)
+    if neighborhoods is None:
+        neighborhoods = await parse_neighborhoods(user_query)
+    if subway_prefs is None:
+        subway_prefs = await parse_subway_preferences(user_query)
+
+    ## --- Build filter conditions ---
+    
+    # For now, no additional hard filters – everything is soft post-processing
+    soft_filters = []
+
+    if amenities:
+        soft_filters.append({"amenities": {"$in": amenities}})
+    if neighborhoods:
+        soft_filters.extend([{"neighborhood": {"$eq": nb}} for nb in neighborhoods])
+    if subway_prefs:
+        if subway_prefs.get("routes"):
+            soft_filters.append({"subway_routes": {"$in": subway_prefs["routes"]}})
+        if subway_prefs.get("lines"):
+            soft_filters.append({"subway_lines": {"$in": subway_prefs["lines"]}})
+        if subway_prefs.get("max_distance") is not None:
+            soft_filters.append({"subway_min_distance": {"$lte": subway_prefs["max_distance"]}})
+
+    def match_condition(value, condition):
+        if not isinstance(condition, dict):
+            return value == condition
+        for op, target in condition.items():
+            if op == "$eq" and value != target:
+                return False
+            elif op == "$lt" and not (value < target):
+                return False
+            elif op == "$lte" and not (value <= target):
+                return False
+            elif op == "$gt" and not (value > target):
+                return False
+            elif op == "$gte" and not (value >= target):
+                return False
+            elif op == "$in":
+                if isinstance(value, list):
+                    if not any(v in target for v in value):
+                        return False
+                else:
+                    if value not in target:
+                        return False
+            elif op == "$nin":
+                if isinstance(value, list):
+                    if any(v in target for v in value):
+                        return False
+                else:
+                    if value in target:
+                        return False
+        return True
+
+    def matches_filter(metadata: Dict[str, Any], filter_obj: Dict[str, Any]) -> bool:
+        for key, condition in filter_obj.items():
+            if key == "$or":
+                if not any(matches_filter(metadata, sub_cond) for sub_cond in condition):
+                    return False
+            else:
+                if key not in metadata or not match_condition(metadata[key], condition):
+                    return False
+        return True
+
+    output = []
+
+    for match in matches:
+        metadata = match.metadata
+        pinecone_score = getattr(match, "score", 0)
+
+        # Hard filters gate (currently empty unless set above)
+        if hard_filters and not matches_filter(metadata, hard_filters):
+            continue
+
+        # Boost score from soft filters
+        boost_score = sum(1 for f in soft_filters if matches_filter(metadata, f))
+        combined_score = pinecone_score + (boost_score * boost_weight)
+
+        output.append({
+            "id": getattr(match, "id", None),
+            "metadata": metadata,
+            "pinecone_score": pinecone_score,
+            "boost_score": boost_score,
+            "combined_score": combined_score
+        })
+
+    # Sort by combined score descending
+    output.sort(key=lambda x: x["combined_score"], reverse=True)
+
+    print(f"[INFO] Post-retrieval scoring: {len(matches)} -> {len(output)} kept")
+    print(f"[INFO] Amenities={amenities}, Neighborhoods={neighborhoods}, Subway={subway_prefs}")
+    return output

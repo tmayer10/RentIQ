@@ -7,78 +7,141 @@ Only handles: price, bedrooms, bathrooms, sqft, zipcode
 import os
 import json
 import re
-from typing import Dict, Any, Tuple, Optional
+import asyncio
+from typing import Dict, Any, Tuple, Optional, Literal
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from rate_limiter import call_llm_with_limit
+from google import genai
+from google.genai import types
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-# Pydantic models for structured output
-class NumericFilter(BaseModel):
-    """Numeric filter with operator."""
-    eq: Optional[float] = Field(None, description="Equals value")
-    lt: Optional[float] = Field(None, description="Less than value")
-    lte: Optional[float] = Field(None, description="Less than or equal value")
-    gt: Optional[float] = Field(None, description="Greater than value")
-    gte: Optional[float] = Field(None, description="Greater than or equal value")
+# Simpler approach: separate models for each operator type
+class PriceFilter(BaseModel):
+    """Price filter with single operator and value."""
+    operator: Literal["eq", "lt", "lte", "gt", "gte"] = Field(description="The comparison operator")
+    value: float = Field(description="The price value in dollars")
+
+
+class SqftFilter(BaseModel):
+    """Square footage filter with single operator and value."""
+    operator: Literal["eq", "lt", "lte", "gt", "gte"] = Field(description="The comparison operator")
+    value: int = Field(description="The square footage value")
 
 
 class PineconeFiltersResponse(BaseModel):
     """Structured response for Pinecone filters."""
-    price: Optional[NumericFilter] = Field(None, description="Price filter in dollars")
-    bedrooms: Optional[int] = Field(None, description="Exact number of bedrooms (use null for studio=0)")
-    bathrooms: Optional[float] = Field(None, description="Exact number of bathrooms")
-    sqft: Optional[NumericFilter] = Field(None, description="Square footage filter")
-    zipcode: Optional[str] = Field(None, description="NYC zipcode (5 digits starting with 10)")
+    price: Optional[PriceFilter] = Field(default=None, description="Price filter. Only set if user mentions price/budget. Use 'lt' for 'under', 'gte' for 'at least'.")
+    bedrooms: Optional[int] = Field(default=None, description="Exact number of bedrooms. Set to 0 for studio, null if not mentioned.")
+    bathrooms: Optional[float] = Field(default=None, description="Exact number of bathrooms. Null if not mentioned.")
+    sqft: Optional[SqftFilter] = Field(default=None, description="Square footage filter. Only set if user mentions sqft/size. Use 'gte' for 'at least'.")
+    zipcode: Optional[str] = Field(default=None, description="NYC zipcode (5 digits). Null if not mentioned.")
 
 
 def build_pinecone_filter_prompt(user_query: str) -> str:
     """Build prompt for extracting simple numeric filters only."""
-    return f"""Extract ONLY these simple numeric/string filters from the user's query:
-- price: Use eq, lt, lte, gt, or gte fields
-- bedrooms: Exact count (studio = 0)
-- bathrooms: Exact count  
-- sqft: Use eq, lt, lte, gt, or gte fields
-- zipcode: 5-digit NYC zipcode
+    return f"""Extract ONLY the filters explicitly mentioned in the user's query. Leave unmentioned fields as null.
+
+OPERATOR MAPPING:
+- "under $3000" / "max $3000" → price: {{operator: "lt", value: 3000}}
+- "at least $2000" / "min $2000" → price: {{operator: "gte", value: 2000}}
+- "exactly $2500" → price: {{operator: "eq", value: 2500}}
+- "at least 800 sqft" → sqft: {{operator: "gte", value: 800}}
+- "studio" → bedrooms: 0
 
 DO NOT extract neighborhoods, amenities, or subway info.
 
 EXAMPLES:
-- "2br under $3000" → bedrooms=2, price.lt=3000
-- "1br, 1ba, at least 800 sqft, max $4000" → bedrooms=1, bathrooms=1, sqft.gt=800, price.lt=4000
-- "studio under $2500 in zipcode 10001" → bedrooms=0, price.lt=2500, zipcode="10001"
-- "3br with laundry near F train" → bedrooms=3
+
+"2br under $3000" →
+{{
+  "bedrooms": 2,
+  "price": {{"operator": "lt", "value": 3000}},
+  "bathrooms": null,
+  "sqft": null,
+  "zipcode": null
+}}
+
+"Looking for a 2 bedroom apartment under $3000 with a gym and near the A train" →
+{{
+  "bedrooms": 2,
+  "price": {{"operator": "lt", "value": 3000}},
+  "bathrooms": null,
+  "sqft": null,
+  "zipcode": null
+}}
+
+"studio under $2500 in zipcode 10001" →
+{{
+  "bedrooms": 0,
+  "price": {{"operator": "lt", "value": 2500}},
+  "bathrooms": null,
+  "sqft": null,
+  "zipcode": "10001"
+}}
+
+"1br, 1ba, at least 800 sqft, max $4000" →
+{{
+  "bedrooms": 1,
+  "bathrooms": 1.0,
+  "sqft": {{"operator": "gte", "value": 800}},
+  "price": {{"operator": "lt", "value": 4000}},
+  "zipcode": null
+}}
+
+"3br with laundry near F train" →
+{{
+  "bedrooms": 3,
+  "price": null,
+  "bathrooms": null,
+  "sqft": null,
+  "zipcode": null
+}}
 
 User query: "{user_query}"
 
-Extract filters using the structured format."""
+Extract ONLY mentioned filters."""
 
 
-def extract_pinecone_filters(user_query: str) -> Dict[str, Any]:
+async def extract_pinecone_filters(user_query: str) -> Dict[str, Any]:
     """
     Extract simple Pinecone metadata filters (price, bed, bath, sqft, zipcode only).
     Uses Pydantic models for structured output.
+    
+    Args:
+        user_query: The user's search query
+        model_name: OpenAI model to use (default: gpt-4o-mini)
     
     Returns:
         Dict with Pinecone-compatible filter structure
     """
     prompt = build_pinecone_filter_prompt(user_query)
+    #messages = [{"role": "user", "content": prompt}]
     
     try:
-        completion = client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format=PineconeFiltersResponse,
-            temperature=0
-        )
-        
-        parsed = completion.choices[0].message.parsed
-        
-        # Convert Pydantic model to Pinecone filter dict
-        filters = _pydantic_to_pinecone_filters(parsed)
+        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+        # Run synchronously in a thread so async code can await
+        response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                system_instruction ="""You are an expert at extracting structured data from user queries.
+                You always respond with valid JSON that adheres to the provided schema.""",
+                response_mime_type="application/json",
+                response_schema= PineconeFiltersResponse,
+                ),
+            )
+
+        # `response.parsed` is already a NeighborhoodsResponse object
+        parsed = response.parsed
+
+        # Convert Pydantic model to Pinecone filter dict with mention gating and range handling
+        filters = _pydantic_to_pinecone_filters(parsed, user_query)
         return filters
         
     except Exception as e:
@@ -86,54 +149,68 @@ def extract_pinecone_filters(user_query: str) -> Dict[str, Any]:
         return _fallback_extract_pinecone_filters(user_query)
 
 
-def _pydantic_to_pinecone_filters(parsed: PineconeFiltersResponse) -> Dict[str, Any]:
-    """Convert Pydantic model to Pinecone filter dict."""
-    filters = {}
-    
-    # Price filter
-    if parsed.price:
-        price_filter = {}
-        if parsed.price.eq is not None:
-            price_filter["$eq"] = parsed.price.eq
-        if parsed.price.lt is not None:
-            price_filter["$lt"] = parsed.price.lt
-        if parsed.price.lte is not None:
-            price_filter["$lte"] = parsed.price.lte
-        if parsed.price.gt is not None:
-            price_filter["$gt"] = parsed.price.gt
-        if parsed.price.gte is not None:
-            price_filter["$gte"] = parsed.price.gte
-        if price_filter:
-            filters["price"] = price_filter
-    
-    # Bedrooms (exact match)
-    if parsed.bedrooms is not None:
+def _pydantic_to_pinecone_filters(parsed: PineconeFiltersResponse, user_query: str) -> Dict[str, Any]:
+    """Convert Pydantic model to Pinecone filter dict with strict mention gating.
+    Only include a field if the user explicitly mentioned it in the query.
+    Also handles explicit price ranges like "between $X and $Y".
+    """
+    text = user_query.lower()
+
+    def mentioned_price() -> bool:
+        return bool(re.search(r"\$\s*\d|\b(price|budget|max|under|over|between|upto|up to)\b", text))
+
+    def mentioned_bedrooms() -> bool:
+        return bool(re.search(r"\bstudio\b|\b\d+\s*(br|bed|bedroom|bedrooms)\b", text))
+
+    def mentioned_bathrooms() -> bool:
+        return bool(re.search(r"\b\d+(?:\.\d+)?\s*(ba|bath|bathroom|bathrooms)\b", text))
+
+    def mentioned_sqft() -> bool:
+        return bool(re.search(r"\b\d+\s*(sq\.?\s*ft|sqft|square\s*feet|sf)\b|\b(sqft|square\s*feet)\b", text))
+
+    def extract_zipcode() -> Optional[str]:
+        m = re.search(r"\b(10\d{3})\b", text)
+        return m.group(1) if m else None
+
+    def extract_price_range() -> Optional[Dict[str, float]]:
+        # between $X and $Y
+        m = re.search(r"between\s*\$?\s*([\d,]+)\s*(?:and|to)\s*\$?\s*([\d,]+)", text)
+        if m:
+            lo = float(m.group(1).replace(",", ""))
+            hi = float(m.group(2).replace(",", ""))
+            if lo > hi:
+                lo, hi = hi, lo
+            return {"$gte": lo, "$lte": hi}
+        return None
+
+    filters: Dict[str, Any] = {}
+
+    # Bedrooms (exact) - require explicit mention
+    if mentioned_bedrooms() and parsed.bedrooms is not None:
         filters["bedrooms"] = {"$eq": parsed.bedrooms}
-    
-    # Bathrooms (exact match)
-    if parsed.bathrooms is not None:
+
+    # Bathrooms (exact) - require explicit mention and non-zero
+    if mentioned_bathrooms() and parsed.bathrooms is not None and parsed.bathrooms != 0:
         filters["bathrooms"] = {"$eq": parsed.bathrooms}
-    
-    # Sqft filter
-    if parsed.sqft:
-        sqft_filter = {}
-        if parsed.sqft.eq is not None:
-            sqft_filter["$eq"] = int(parsed.sqft.eq)
-        if parsed.sqft.lt is not None:
-            sqft_filter["$lt"] = int(parsed.sqft.lt)
-        if parsed.sqft.lte is not None:
-            sqft_filter["$lte"] = int(parsed.sqft.lte)
-        if parsed.sqft.gt is not None:
-            sqft_filter["$gt"] = int(parsed.sqft.gt)
-        if parsed.sqft.gte is not None:
-            sqft_filter["$gte"] = int(parsed.sqft.gte)
-        if sqft_filter:
-            filters["sqft"] = sqft_filter
-    
-    # Zipcode
-    if parsed.zipcode:
-        filters["zipcode"] = {"$eq": parsed.zipcode}
-    
+
+    # Price - require explicit mention; support explicit ranges from text
+    if mentioned_price():
+        range_filter = extract_price_range()
+        if range_filter:
+            filters["price"] = range_filter
+        elif parsed.price:
+            # Map single operator
+            filters["price"] = {f"${parsed.price.operator}": parsed.price.value}
+
+    # Sqft - require explicit mention and non-zero
+    if mentioned_sqft() and parsed.sqft and parsed.sqft.value not in (None, 0):
+        filters["sqft"] = {f"${parsed.sqft.operator}": int(parsed.sqft.value)}
+
+    # Zipcode - require explicit presence of a valid zipcode in text
+    zc = extract_zipcode()
+    if zc:
+        filters["zipcode"] = {"$eq": zc}
+
     return filters
 
 
