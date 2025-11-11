@@ -12,3 +12,4 @@ sentence-transformers
 transformers
 torch
 streamlit
+deepeval
