@@ -106,9 +106,13 @@ async def rag_search(
 
     # Step 3: Retrieve from Pinecone using simple pre-filters (fetch more for post-filtering)
     # Reuse prior matches if response is general and filters didn't change
+    print(f"[DECISION] response_type={response_type}, filters_changed={filters_changed}, is_new_search={is_new_search}")
+
     if response_type == "general" and not filters_changed and previous_matches:
+        print(f"[ACTION] REUSING {len(previous_matches)} previous matches")
         raw_matches = previous_matches
     else:
+        print(f"[ACTION] RETRIEVING new matches from Pinecone")
         # Adaptive over-fetch: if we have both price and bedrooms, fetch less
         has_strong_filters = bool(pinecone_filters.get("price")) and bool(pinecone_filters.get("bedrooms"))
         retrieval_k = top_k * (2 if has_strong_filters else 3)
@@ -166,16 +170,18 @@ async def rag_search(
     # Step 5: Trim to requested top_k after filtering
     matches = matches[:top_k]
     
-    # Build clarification if results are sparse
+    # Build clarification only when zero results
     clarification = None
-    if len(matches) < top_k // 2:
+    if len(matches) == 0:
         missing = []
         if not pinecone_filters:
             missing.append("budget or bedroom count")
         if not neighborhoods and not amenities and not subway_prefs.get("routes"):
             missing.append("preferred neighborhood or subway line")
         if missing:
-            clarification = f"I found {len(matches)} matches. For better results, could you specify: {', '.join(missing)}?"
+            clarification = f"I found no matches. Could you try specifying: {', '.join(missing)}?"
+        else:
+            clarification = "I found no matches with those criteria. Try expanding your budget, increasing bedroom count, or exploring different neighborhoods."
 
     # Step 6: Build current-turn retrieval context (include score/compromises inline)
     # Create a quick map for compromises
@@ -272,4 +278,12 @@ Guidelines:
     )
     llm_output = response.choices[0].message.content.strip()
 
-    return llm_output, matches, clarification, pinecone_filters
+    # Step 9: Package complete filter state (hard + soft filters)
+    filter_state = {
+        "hard": pinecone_filters,
+        "amenities": amenities,
+        "neighborhoods": neighborhoods,
+        "subway": subway_prefs
+    }
+
+    return llm_output, matches, clarification, filter_state

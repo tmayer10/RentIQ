@@ -12,3 +12,4 @@ sentence-transformers
 transformers
 torch
 streamlit
+redis>=5.0.0  # Redis client for session storage
