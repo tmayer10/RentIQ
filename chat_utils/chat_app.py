@@ -88,30 +88,61 @@ def display_with_images(text: str, structured_data, listing_ids: list, images_da
     """
     Display LLM output with expandable image sections for each listing.
     Uses structured data if available, otherwise falls back to text parsing.
+    Handles both Pydantic models and dict-based structured data (from stored messages).
     """
-    # If we have structured data, use it directly (much more reliable!)
-    if structured_data and hasattr(structured_data, 'listings'):
-        # Display each listing with its expander
-        for listing in structured_data.listings:
-            listing_id = listing.listing_id
+    # Check if structured_data is a dict (from stored messages) or Pydantic model
+    listings = None
+    final_recommendation = None
+    
+    if structured_data:
+        if isinstance(structured_data, dict) and structured_data.get("type") == "StructuredListingResponse":
+            # Dict-based structured data from stored messages
+            listings = structured_data.get("listings", [])
+            final_recommendation = structured_data.get("final_recommendation")
+        elif hasattr(structured_data, 'listings'):
+            # Pydantic model
+            listings = structured_data.listings
+            final_recommendation = structured_data.final_recommendation if hasattr(structured_data, 'final_recommendation') else None
+    
+    # If we have structured listings data, use it directly
+    if listings:
+        for listing in listings:
+            # Handle both dict and Pydantic model access
+            if isinstance(listing, dict):
+                listing_id = listing.get("listing_id", "")
+                price = listing.get("price", 0)
+                bedrooms = listing.get("bedrooms", 0)
+                bathrooms = listing.get("bathrooms", 0)
+                neighborhood = listing.get("neighborhood", "")
+                amenities = listing.get("amenities", [])
+                summary = listing.get("summary", "")
+            else:
+                listing_id = listing.listing_id
+                price = listing.price
+                bedrooms = listing.bedrooms
+                bathrooms = listing.bathrooms
+                neighborhood = listing.neighborhood
+                amenities = listing.amenities
+                summary = listing.summary
+            
             listing_url = get_listing_url(listing_id)
             
             # Display listing info with hyperlinked ID
             if listing_url:
-                st.markdown(f"**ID:** [{listing_id}]({listing_url})")
+                st.markdown(f"**ID:** [{listing_id}]({listing_url})", unsafe_allow_html=False)
             else:
-                st.markdown(f"**ID:** {listing_id}")
+                st.markdown(f"**ID:** {listing_id}", unsafe_allow_html=False)
             
-            st.markdown(f"**Price:** ${listing.price}")
-            st.markdown(f"**Bedrooms:** {listing.bedrooms}, **Bathrooms:** {listing.bathrooms}")
-            st.markdown(f"**Neighborhood:** {listing.neighborhood}")
-            st.markdown(f"**Amenities:** {', '.join(listing.amenities)}")
+            st.markdown(f"**Price:** ${price}", unsafe_allow_html=False)
+            st.markdown(f"**Bedrooms:** {bedrooms}, **Bathrooms:** {bathrooms}", unsafe_allow_html=False)
+            st.markdown(f"**Neighborhood:** {neighborhood}", unsafe_allow_html=False)
+            st.markdown(f"**Amenities:** {', '.join(amenities)}", unsafe_allow_html=False)
             
             # Add expander with images right after amenities
             if listing_id in images_data and images_data[listing_id]:
                 with st.expander(f"📸 View Images for Listing {listing_id}", expanded=False):
                     if listing_url:
-                        st.markdown(f"[View Full Listing →]({listing_url})")
+                        st.markdown(f"[View Full Listing →]({listing_url})", unsafe_allow_html=False)
                     
                     # Display all available images
                     for img_url in images_data[listing_id]:
@@ -120,17 +151,17 @@ def display_with_images(text: str, structured_data, listing_ids: list, images_da
                         except Exception as e:
                             st.error(f"Could not load image: {str(e)[:50]}")
             
-            st.markdown(f"**Summary:** {listing.summary}")
+            st.markdown(f"**Summary:** {summary}", unsafe_allow_html=False)
             st.markdown("---")  # Separator between listings
         
         # Display final recommendation if present
-        if structured_data.final_recommendation:
-            st.markdown(structured_data.final_recommendation)
+        if final_recommendation:
+            st.markdown(final_recommendation, unsafe_allow_html=False)
     else:
         # Fallback to text parsing (for backward compatibility or when structured output fails)
         if not listing_ids or not images_data:
             # No images to show, just display the text
-            st.markdown(text)
+            st.markdown(text, unsafe_allow_html=False)
         else:
             _parse_and_display_text_with_images(text, listing_ids, images_data)
 
@@ -157,13 +188,13 @@ def _parse_and_display_text_with_images(text: str, listing_ids: list, images_dat
         
         # Check if this is the Amenities line for the current listing
         if current_listing_id and re.search(r'Amenities:', line, re.IGNORECASE):
-            st.markdown(line)
+            st.markdown(line, unsafe_allow_html=False)
             # Add expander right after amenities if we have images
             if current_listing_id in images_data and images_data[current_listing_id]:
                 with st.expander(f"📸 View Images for Listing {current_listing_id}", expanded=False):
                     listing_url = get_listing_url(current_listing_id)
                     if listing_url:
-                        st.markdown(f"[View Full Listing →]({listing_url})")
+                        st.markdown(f"[View Full Listing →]({listing_url})", unsafe_allow_html=False)
                     
                     for img_url in images_data[current_listing_id]:
                         try:
@@ -181,7 +212,7 @@ def _parse_and_display_text_with_images(text: str, listing_ids: list, images_dat
                     if not re.search(r'(?:^|\*\*|^[\d]+\.\s*)(?:ID:\s*|Listing\s+ID:\s*)(\d{6,8})', next_line, re.IGNORECASE):
                         current_listing_id = None
         
-        st.markdown(line)
+        st.markdown(line, unsafe_allow_html=False)
         i += 1
 
 st.title("🏙️ RentIQ — NYC Apartment Finder")
@@ -219,6 +250,13 @@ if use_redis and store:
             # Initialize with system message
             store.add_message(session_id, "system", "You are RentIQ, a helpful NYC apartment assistant.")
             messages = store.get_messages(session_id)
+        # Merge metadata back into messages if available
+        if "message_metadata" in st.session_state:
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "assistant" and i in st.session_state["message_metadata"]:
+                    metadata = st.session_state["message_metadata"][i]
+                    msg["structured_data"] = metadata.get("structured_data")
+                    msg["listing_ids"] = metadata.get("listing_ids", [])
         st.session_state["messages"] = messages
         st.session_state["messages_loaded"] = True
 else:
@@ -256,12 +294,23 @@ for msg in st.session_state["messages"]:
     if msg["role"] == "system":
         continue
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        # Check if this message has structured data for proper re-rendering
+        if msg.get("role") == "assistant" and "structured_data" in msg:
+            # Re-render with images if structured data is available
+            structured_data = msg.get("structured_data")
+            listing_ids = msg.get("listing_ids", [])
+            images_data = {}
+            if listing_ids:
+                images_data = get_listing_images_batch(listing_ids, max_images=5)
+            display_with_images(msg["content"], structured_data, listing_ids, images_data)
+        else:
+            # Regular message - use unsafe_allow_html=False to prevent markdown interpretation issues
+            st.markdown(msg["content"], unsafe_allow_html=False)
 
 # Chat input
 user_query = st.chat_input("Ask about apartments, neighborhoods, prices, or follow up...")
 
-executor = ThreadPoolExecutor(max_workers=4)  # adjust parallelism
+executor = ThreadPoolExecutor(max_workers=8)  # adjust parallelism
 
 def run_rag_search_sync(user_query, top_k, chat_history, is_first_turn, previous_filters, previous_matches):
     """Run the async rag_search inside a background thread and return results."""
@@ -281,33 +330,39 @@ if user_query:
         store.add_message(session_id, "user", user_query)
 
     with st.chat_message("user"):
-        st.markdown(user_query)
+        st.markdown(user_query, unsafe_allow_html=False)
 
-    with st.spinner("Searching and analyzing..."):
-        history_for_llm = [m for m in st.session_state["messages"] if m["role"] != "system"]
-        prior_assistant_msgs = [m for m in history_for_llm if m["role"] == "assistant"]
-        is_first_turn = len(prior_assistant_msgs) == 0
+    # Use a simple text placeholder instead of spinner to avoid overlay
+    status_placeholder = st.empty()
+    status_placeholder.info("🔍 Searching and analyzing...")
+    
+    history_for_llm = [m for m in st.session_state["messages"] if m["role"] != "system"]
+    prior_assistant_msgs = [m for m in history_for_llm if m["role"] == "assistant"]
+    is_first_turn = len(prior_assistant_msgs) == 0
 
-        # Get previous state (from Redis or in-memory)
-        if use_redis and store:
-            current_search = store.get_current_search(session_id)
-            previous_filters = current_search["filter_state"] if current_search else None
-            previous_matches = current_search["matches"] if current_search else None
-        else:
-            previous_filters = st.session_state.get("previous_filters")
-            previous_matches = st.session_state.get("last_matches")
+    # Get previous state (from Redis or in-memory)
+    if use_redis and store:
+        current_search = store.get_current_search(session_id)
+        previous_filters = current_search["filter_state"] if current_search else None
+        previous_matches = current_search["matches"] if current_search else None
+    else:
+        previous_filters = st.session_state.get("previous_filters")
+        previous_matches = st.session_state.get("last_matches")
 
-        # Submit background task with previous state
-        future = executor.submit(
-            run_rag_search_sync,
-            user_query,
-            top_k,
-            history_for_llm,
-            is_first_turn,
-            previous_filters,  # Pass previous filters (complete state)
-            previous_matches    # Pass previous matches
-        )
-        llm_output, matches, clarification, filter_state, structured_data = future.result()
+    # Submit background task with previous state
+    future = executor.submit(
+        run_rag_search_sync,
+        user_query,
+        top_k,
+        history_for_llm,
+        is_first_turn,
+        previous_filters,  # Pass previous filters (complete state)
+        previous_matches    # Pass previous matches
+    )
+    llm_output, matches, clarification, filter_state, structured_data = future.result()
+
+    # Clear status placeholder after search completes
+    status_placeholder.empty()
 
     # Extract listing IDs from matches and structured data (preferred) or LLM output
     match_listing_ids = extract_listing_ids_from_matches(matches)
@@ -339,6 +394,37 @@ if user_query:
         clarification_with_links = None
 
     # Store and show results
+    # Prepare structured data for storage (convert Pydantic models to dicts)
+    structured_data_dict = None
+    if structured_data:
+        if hasattr(structured_data, 'listings'):
+            # StructuredListingResponse - convert Pydantic models to dicts
+            # Handle both Pydantic v1 (.dict()) and v2 (.model_dump())
+            def to_dict(obj):
+                if hasattr(obj, 'model_dump'):
+                    return obj.model_dump()  # Pydantic v2
+                elif hasattr(obj, 'dict'):
+                    return obj.dict()  # Pydantic v1
+                else:
+                    return obj  # Already a dict
+            
+            structured_data_dict = {
+                "type": "StructuredListingResponse",
+                "listings": [to_dict(listing) for listing in structured_data.listings],
+                "final_recommendation": structured_data.final_recommendation
+            }
+        elif isinstance(structured_data, dict) and "referenced_listing_ids" in structured_data:
+            # ConversationalResponse (already a dict)
+            structured_data_dict = structured_data
+    
+    # Store message with metadata for proper re-rendering
+    assistant_message = {
+        "role": "assistant",
+        "content": llm_output_with_links,
+        "structured_data": structured_data_dict,
+        "listing_ids": all_listing_ids
+    }
+    
     if use_redis and store:
         # Save to Redis
         search_id = generate_search_id()
@@ -350,14 +436,24 @@ if user_query:
             matches=[{"metadata": m.metadata, "score": m.score} for m in matches] if matches else [],
         )
         store.set_current_search_id(session_id, search_id)
-        # Store the version with hyperlinks
+        # Store message with metadata - need to extend add_message or store separately
+        # For now, store as JSON string in content and parse later, or extend SessionStore
+        # We'll store it in session state for now and extend Redis storage if needed
         store.add_message(session_id, "assistant", llm_output_with_links)
+        # Also store structured data separately in session state
+        if "message_metadata" not in st.session_state:
+            st.session_state["message_metadata"] = {}
+        msg_index = len(store.get_messages(session_id)) - 1
+        st.session_state["message_metadata"][msg_index] = {
+            "structured_data": structured_data_dict,
+            "listing_ids": all_listing_ids
+        }
         st.session_state["messages"] = store.get_messages(session_id)
     else:
         # Fall back to in-memory
         st.session_state["last_matches"] = matches
         st.session_state["previous_filters"] = filter_state  # Store complete filter state for next turn
-        st.session_state["messages"].append({"role": "assistant", "content": llm_output_with_links})
+        st.session_state["messages"].append(assistant_message)
 
     with st.chat_message("assistant"):
         # Get images data for listings
@@ -369,38 +465,14 @@ if user_query:
         display_with_images(llm_output_with_links, structured_data, all_listing_ids, images_data)
 
     if clarification_with_links:
+        clarification_message = {
+            "role": "assistant",
+            "content": clarification_with_links
+        }
         if use_redis and store:
             store.add_message(session_id, "assistant", clarification_with_links)
             st.session_state["messages"] = store.get_messages(session_id)
         else:
-            st.session_state["messages"].append({"role": "assistant", "content": clarification_with_links})
+            st.session_state["messages"].append(clarification_message)
         with st.chat_message("assistant"):
-            st.markdown(clarification_with_links)
-
-    with st.expander("Retrieved Listings (this turn)"):
-        # Create table with hyperlinked listing IDs
-        listings_data = []
-        for i, m in enumerate(matches):
-            # Handle both dict and object access patterns
-            metadata = m.metadata if hasattr(m, 'metadata') else m.get('metadata', {})
-            listing_id = str(metadata.get("listing_id", ""))
-            listing_url = get_listing_url(listing_id)
-            
-            # Create hyperlinked listing ID
-            if listing_url:
-                linked_id = f"[{listing_id}]({listing_url})"
-            else:
-                linked_id = listing_id
-            
-            listings_data.append({
-                "Rank": i+1,
-                "Listing ID": linked_id,
-                "Price": metadata.get("price"),
-                "Beds": metadata.get("bedrooms"),
-                "Baths": metadata.get("bathrooms"),
-                "Neighborhood": metadata.get("neighborhood"),
-                "Borough": metadata.get("borough"),
-                "Amenities": ", ".join(metadata.get("amenities", [])),
-            })
-        st.markdown("**Note:** Click on listing IDs to view the full listing page.")
-        st.table(listings_data)
+            st.markdown(clarification_with_links, unsafe_allow_html=False)

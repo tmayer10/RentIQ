@@ -58,11 +58,25 @@ def format_listings(matches):
     formatted = []
     for rank, m in enumerate(matches, start=1):
         md = m['metadata']
+
+        # Format subway information
+        subway_text = ""
+        route_distances = md.get('route_distances', {})
+        if route_distances:
+            # Sort routes by distance and show top 3 closest
+            sorted_routes = sorted(route_distances.items(), key=lambda x: x[1])[:3]
+            subway_parts = [f"{route.upper()} train ({dist:.2f} mi)" for route, dist in sorted_routes]
+            subway_text = f"   Subway: {', '.join(subway_parts)}\n"
+        elif md.get('subway_info'):
+            # Fallback to subway_info string if route_distances not available
+            subway_text = f"   Subway: {md.get('subway_info')}\n"
+
         formatted.append(
             f"{rank}. ID: {md.get('listing_id')}\n"
             f"   Price: ${md.get('price')}\n"
             f"   Bedrooms: {md.get('bedrooms')}, Bathrooms: {md.get('bathrooms')}\n"
             f"   Neighborhood: {md.get('neighborhood')}, Borough: {md.get('borough')}\n"
+            f"{subway_text}"
             f"   Amenities: {', '.join(md.get('amenities', []))}\n"
             f"   Description: {md.get('description')}\n"
         )
@@ -279,11 +293,12 @@ Here are the top {top_k} listings retrieved from our database for this turn:
 TASK:
 - Provide a ranked list from most to least relevant.
 - For each listing: include the exact listing_id, price, bedrooms, bathrooms, neighborhood, amenities, and a summary explaining why it matches the user's needs.
+- If subway distances are provided in the listing data, MENTION them in your summary (e.g., "0.15 miles from the 1 train").
 - Be concise but informative in the summaries.
 - Optionally include a final_recommendation with overall guidance.
 - If this is an UPDATED search (user changed requirements), acknowledge what changed in the final_recommendation.
 
-IMPORTANT: Use the exact listing_id values from the context above. Include all amenities from the listing data.
+IMPORTANT: Use the exact listing_id values from the context above. Include all amenities from the listing data. When subway access is mentioned in the query or available in the data, highlight it prominently.
 """
         # Use structured output for new searches
         use_structured = True
@@ -301,6 +316,7 @@ Top {top_k} listings retrieved for this turn:
 Guidelines:
 - Keep a conversational tone. Avoid rigid ranking formatting unless explicitly requested.
 - Reference prior preferences when relevant. If a referred listing is not in the current results, say so and suggest refining filters.
+- If the user asks about subway access or distances, highlight those details from the listing data.
 - Provide a succinct, helpful answer (2–5 sentences) and, when appropriate, suggest the next best question or adjustment.
 - If you mention any listing IDs, include them in referenced_listing_ids.
 """

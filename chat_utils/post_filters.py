@@ -57,6 +57,10 @@ class SubwayPreferencesResponse(BaseModel):
         default_factory=list,
         description="List of subway line names (multi-word, lowercase)"
     )
+    min_distance: Optional[float] = Field(
+        None,
+        description="Minimum distance from subway in miles (for range queries)"
+    )
     max_distance: Optional[float] = Field(
         None,
         description="Maximum distance from subway in miles"
@@ -252,17 +256,21 @@ CANONICAL ROUTES: {', '.join(SUBWAY_ROUTES)}
 CANONICAL LINES: {', '.join(SUBWAY_LINES)}
 
 EXAMPLES:
-- "near F train" → routes=["f"], max_distance=null
-- "within 0.5 miles of 1 train" → routes=["1"], max_distance=0.5
-- "close to A/C/E" → routes=["a","c","e"], max_distance=null
-- "on Lexington line" → lines=["lexington"], max_distance=null
-- "within 10 min walk of subway" → routes=[], lines=[], max_distance=0.5
+- "near F train" → routes=["f"], min_distance=null, max_distance=null
+- "within 0.5 miles of 1 train" → routes=["1"], min_distance=null, max_distance=0.5
+- "close to A/C/E" → routes=["a","c","e"], min_distance=null, max_distance=null
+- "on Lexington line" → lines=["lexington"], min_distance=null, max_distance=null
+- "within 10 min walk of subway" → routes=[], lines=[], min_distance=null, max_distance=0.5
+- "1-2 miles from subway lines" → routes=[], lines=[], min_distance=1.0, max_distance=2.0
+- "roughly 1-2 miles from the A train" → routes=["a"], min_distance=1.0, max_distance=2.0
+- "between 0.5 and 1 mile from F" → routes=["f"], min_distance=0.5, max_distance=1.0
 
 Rules:
 1. Routes: single char/number (lowercase)
 2. Lines: multi-word (lowercase)
 3. Distance: miles (0.5 mi ≈ 10 min walk, 0.3 mi ≈ 5 min)
-4. "close to subway" without route → empty routes/lines
+4. Distance ranges: extract both min_distance and max_distance when specified
+5. "close to subway" without route → empty routes/lines, max_distance=0.5
 
 User query: "{user_query}"
 
@@ -292,6 +300,7 @@ Extract subway preferences:"""
         result = {
             "routes": [r.lower() for r in parsed.routes if r.lower() in SUBWAY_ROUTES],
             "lines": [l.lower() for l in parsed.lines if l.lower() in SUBWAY_LINES],
+            "min_distance": parsed.min_distance,
             "max_distance": parsed.max_distance
         }
         return result
@@ -303,7 +312,7 @@ Extract subway preferences:"""
 def _fallback_parse_subway(user_query: str) -> Dict[str, Any]:
     """Regex-based fallback for subway extraction."""
     query_lower = user_query.lower()
-    
+
     # Extract routes
     routes = set()
     for route in SUBWAY_ROUTES:
@@ -317,24 +326,34 @@ def _fallback_parse_subway(user_query: str) -> Dict[str, Any]:
             if re.search(pattern, query_lower):
                 routes.add(route.lower())
                 break
-    
+
     # Extract lines
     lines = set()
     for line in SUBWAY_LINES:
         if line in query_lower:
             lines.add(line.lower())
-    
-    # Extract distance
+
+    # Extract distance (with range support)
+    min_distance = None
     max_distance = None
-    dist_match = re.search(r"within\s+(\d+(?:\.\d+)?)\s*miles?", query_lower)
-    if dist_match:
-        max_distance = float(dist_match.group(1))
-    elif "close to subway" in query_lower or "near subway" in query_lower:
-        max_distance = 0.5  # default 0.5 miles
-    
+
+    # Try to match range patterns like "1-2 miles", "between 1 and 2 miles", "roughly 1-2 miles"
+    range_match = re.search(r"(?:between\s+)?(\d+(?:\.\d+)?)\s*(?:and|-|to)\s*(\d+(?:\.\d+)?)\s*miles?", query_lower)
+    if range_match:
+        min_distance = float(range_match.group(1))
+        max_distance = float(range_match.group(2))
+    else:
+        # Try single distance with "within" or "under"
+        dist_match = re.search(r"(?:within|under|less than)\s+(\d+(?:\.\d+)?)\s*miles?", query_lower)
+        if dist_match:
+            max_distance = float(dist_match.group(1))
+        elif "close to subway" in query_lower or "near subway" in query_lower:
+            max_distance = 0.5  # default 0.5 miles
+
     return {
         "routes": list(routes),
         "lines": list(lines),
+        "min_distance": min_distance,
         "max_distance": max_distance
     }
 
@@ -446,7 +465,7 @@ async def apply_post_retrieval_filters(
         subway_prefs = await parse_subway_preferences(user_query)
 
     ## --- Build filter conditions ---
-    
+
     # For now, no additional hard filters – everything is soft post-processing
     soft_filters = []
 
@@ -459,8 +478,9 @@ async def apply_post_retrieval_filters(
             soft_filters.append({"subway_routes": {"$in": subway_prefs["routes"]}})
         if subway_prefs.get("lines"):
             soft_filters.append({"subway_lines": {"$in": subway_prefs["lines"]}})
-        if subway_prefs.get("max_distance") is not None:
-            soft_filters.append({"subway_min_distance": {"$lte": subway_prefs["max_distance"]}})
+        # Handle distance constraints (ranges supported)
+        if subway_prefs.get("min_distance") is not None or subway_prefs.get("max_distance") is not None:
+            soft_filters.append({"subway_distance_range": subway_prefs})
 
     def match_condition(value, condition):
         if not isinstance(condition, dict):
@@ -497,9 +517,76 @@ async def apply_post_retrieval_filters(
             if key == "$or":
                 if not any(matches_filter(metadata, sub_cond) for sub_cond in condition):
                     return False
+            elif key == "subway_distance_range":
+                # Special handling for subway distance range filtering
+                if not matches_subway_distance_range(metadata, condition):
+                    return False
             else:
                 if key not in metadata or not match_condition(metadata[key], condition):
                     return False
+        return True
+
+    def matches_subway_distance_range(metadata: Dict[str, Any], prefs: Dict[str, Any]) -> bool:
+        """
+        Check if listing matches subway distance preferences.
+        Supports filtering by specific routes/lines with distance ranges.
+
+        Args:
+            metadata: Listing metadata from Pinecone
+            prefs: Dict with keys: routes, lines, min_distance, max_distance
+
+        Returns:
+            True if listing matches distance constraints
+        """
+        min_dist = prefs.get("min_distance")
+        max_dist = prefs.get("max_distance")
+        routes = prefs.get("routes", [])
+        lines = prefs.get("lines", [])
+
+        # Get route_distances from metadata (dict of {route: distance})
+        route_distances = metadata.get("route_distances", {})
+        if not route_distances:
+            # Fallback to subway_min_distance if route_distances not available
+            min_distance = metadata.get("subway_min_distance")
+            if min_distance is None:
+                return False
+            # Check if min_distance falls within range
+            # Note: min_dist check rejects listings TOO CLOSE (edge case for noise avoidance)
+            if min_dist is not None and min_distance < min_dist:
+                return False
+            if max_dist is not None and min_distance > max_dist:
+                return False
+            return True
+
+        # If specific routes are specified, check those routes
+        if routes:
+            matching_distances = [route_distances.get(r) for r in routes if r in route_distances]
+            if not matching_distances:
+                return False
+            # Use the closest matching route for distance check
+            closest = min(matching_distances)
+            if min_dist is not None and closest < min_dist:
+                return False  # Too close (rare case)
+            if max_dist is not None and closest > max_dist:
+                return False  # Too far
+            return True
+
+        # If specific lines are specified (less common), check metadata subway_lines
+        # and use the overall min distance (approximation)
+        if lines:
+            listing_lines = metadata.get("subway_lines", [])
+            if not any(line in listing_lines for line in lines):
+                return False
+
+        # No specific routes/lines, use overall min distance
+        all_distances = list(route_distances.values())
+        if not all_distances:
+            return False
+        closest = min(all_distances)
+        if min_dist is not None and closest < min_dist:
+            return False  # Too close (rare edge case)
+        if max_dist is not None and closest > max_dist:
+            return False  # Too far
         return True
 
     output = []
