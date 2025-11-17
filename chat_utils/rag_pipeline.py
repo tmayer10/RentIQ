@@ -54,10 +54,17 @@ class ConversationalResponse(BaseModel):
 
 
 def format_listings(matches):
-    """Convert matches from Pinecone into a neat text block for LLM context."""
+    """Convert matches from Pinecone into a neat text block for LLM context.
+    
+    Handles both dict format (from Redis) and object format (from Pinecone).
+    """
     formatted = []
     for rank, m in enumerate(matches, start=1):
-        md = m['metadata']
+        # Handle both dict format and object format
+        if isinstance(m, dict):
+            md = m.get("metadata", {})
+        else:
+            md = m.metadata
 
         # Format subway information
         subway_text = ""
@@ -233,21 +240,35 @@ async def rag_search(
             clarification = "I found no matches with those criteria. Try expanding your budget, increasing bedroom count, or exploring different neighborhoods."
 
     # Step 6: Build current-turn retrieval context (include score/compromises inline)
+    # Helper function to extract metadata and score from either dict or object format
+    def get_match_metadata(match):
+        """Extract metadata from match (handles both dict and object formats)."""
+        if isinstance(match, dict):
+            return match.get("metadata", {})
+        return match.metadata
+    
+    def get_match_score(match):
+        """Extract score from match (handles both dict and object formats)."""
+        if isinstance(match, dict):
+            return match.get("score", 0.0)
+        return match.score
+    
     # Create a quick map for compromises
     id_to_score = {}
     id_to_comp = {}
     for m, s, comp in scored:
-        mid = m.metadata.get("listing_id")
+        md = get_match_metadata(m)
+        mid = md.get("listing_id")
         id_to_score[mid] = s
         id_to_comp[mid] = comp
 
     def format_with_scores(ms):
         lines = []
         for rank, m in enumerate(ms, start=1):
-            md = m.metadata
+            md = get_match_metadata(m)
             lid = md.get('listing_id')
             score = id_to_score.get(lid)
-            retrieval_score = m.score
+            retrieval_score = get_match_score(m)
             comp = id_to_comp.get(lid) or []
             lines.append(
                 f"{rank}. ID: {lid} (score: {score}; retrieval score: {retrieval_score})\n"

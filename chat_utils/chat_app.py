@@ -78,10 +78,23 @@ def extract_listing_ids_from_text(text: str) -> list:
 
 
 def extract_listing_ids_from_matches(matches) -> list:
-    """Extract listing IDs from match objects."""
+    """Extract listing IDs from match objects.
+    
+    Handles both dict format (from Redis) and object format (from Pinecone).
+    """
     if not matches:
         return []
-    return [str(m.metadata.get("listing_id", "")) for m in matches if m.metadata.get("listing_id")]
+    result = []
+    for m in matches:
+        # Handle both dict format and object format
+        if isinstance(m, dict):
+            md = m.get("metadata", {})
+        else:
+            md = m.metadata
+        listing_id = md.get("listing_id")
+        if listing_id:
+            result.append(str(listing_id))
+    return result
 
 
 def display_with_images(text: str, structured_data, listing_ids: list, images_data: dict):
