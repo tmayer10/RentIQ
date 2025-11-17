@@ -164,9 +164,11 @@ async def rag_search(
     # Reuse prior matches if response is general and filters didn't change
     print(f"[DECISION] response_type={response_type}, filters_changed={filters_changed}, is_new_search={is_new_search}")
 
+    matches_reused = False
     if response_type == "general" and not filters_changed and previous_matches:
         print(f"[ACTION] REUSING {len(previous_matches)} previous matches")
         raw_matches = previous_matches
+        matches_reused = True
     else:
         print(f"[ACTION] RETRIEVING new matches from Pinecone")
         # Adaptive over-fetch: if we have both price and bedrooms, fetch less
@@ -270,11 +272,28 @@ async def rag_search(
             score = id_to_score.get(lid)
             retrieval_score = get_match_score(m)
             comp = id_to_comp.get(lid) or []
+            
+            # Format subway information
+            subway_text = ""
+            route_distances = md.get('route_distances', {})
+            if route_distances:
+                # Sort routes by distance and show top 3 closest
+                sorted_routes = sorted(route_distances.items(), key=lambda x: x[1])[:3]
+                subway_parts = [f"{route.upper()} train ({dist:.2f} mi)" for route, dist in sorted_routes]
+                subway_text = f"   Subway: {', '.join(subway_parts)}\n"
+            elif md.get('subway_info'):
+                # Fallback to subway_info string if route_distances not available
+                subway_text = f"   Subway: {md.get('subway_info')}\n"
+            elif md.get('subway_min_distance') is not None:
+                # Fallback to minimum distance if available
+                subway_text = f"   Subway: {md.get('subway_min_distance'):.2f} mi from nearest station\n"
+            
             lines.append(
                 f"{rank}. ID: {lid} (score: {score}; retrieval score: {retrieval_score})\n"
                 f"   Price: ${md.get('price')}\n"
                 f"   Bedrooms: {md.get('bedrooms')}, Bathrooms: {md.get('bathrooms')}\n"
                 f"   Neighborhood: {md.get('neighborhood')}, Borough: {md.get('borough')}\n"
+                f"{subway_text}"
                 f"   Amenities: {', '.join(md.get('amenities', []))}\n"
                 f"   Compromises: {', '.join(comp) if comp else 'None'}\n"
             )
@@ -315,29 +334,40 @@ TASK:
 - Provide a ranked list from most to least relevant.
 - For each listing: include the exact listing_id, price, bedrooms, bathrooms, neighborhood, amenities, and a summary explaining why it matches the user's needs.
 - If subway distances are provided in the listing data, MENTION them in your summary (e.g., "0.15 miles from the 1 train").
+- If the user asks for information in a TABLE format (e.g., "give me X in a table"), create a properly formatted markdown table with the requested data.
+- When creating tables with subway distances, include columns for Listing ID and each subway route with its distance.
 - Be concise but informative in the summaries.
 - Optionally include a final_recommendation with overall guidance.
 - If this is an UPDATED search (user changed requirements), acknowledge what changed in the final_recommendation.
 
-IMPORTANT: Use the exact listing_id values from the context above. Include all amenities from the listing data. When subway access is mentioned in the query or available in the data, highlight it prominently.
+IMPORTANT: Use the exact listing_id values from the context above. Include all amenities from the listing data. When subway access is mentioned in the query or available in the data, highlight it prominently. Subway distance information is available in the listing data above - use it when answering questions about subway proximity.
 """
         # Use structured output for new searches
         use_structured = True
         schema_model = StructuredListingResponse
     else:
+        # Determine if matches were reused (same listings from previous turn)
+        reuse_note = ""
+        if matches_reused:
+            reuse_note = f"""
+IMPORTANT CONTEXT: The listings shown below are the SAME listings from the previous turn (they were reused because your query is a follow-up question, not a new search). When the user refers to "these listings" or "from these listings", they are referring to the listings shown below.
+"""
+        
         current_user_prompt = f"""
 You are continuing an ongoing conversation. Answer naturally and concisely while grounding strictly in the retrieved listings for this turn.
 
 User's latest message: "{user_query}"
 Rewritten standalone query: "{standalone_query}"
-
-Top {top_k} listings retrieved for this turn:
+{reuse_note}
+Top {top_k} listings{' (same as previous turn)' if matches_reused else ' retrieved for this turn'}:
 {context_block}
 
 Guidelines:
 - Keep a conversational tone. Avoid rigid ranking formatting unless explicitly requested.
-- Reference prior preferences when relevant. If a referred listing is not in the current results, say so and suggest refining filters.
-- If the user asks about subway access or distances, highlight those details from the listing data.
+- If the user asks for information in a TABLE format (e.g., "give me X in a table"), create a properly formatted markdown table with the requested data.
+- When creating tables with subway distances, include columns for Listing ID and each subway route with its distance.
+- {"IMPORTANT: These are the SAME listings you showed in your previous response. When the user asks about 'these listings' or refers to listings from the previous turn, they mean the listings shown above. " if matches_reused else ""}Reference prior preferences when relevant. If a referred listing is not in the current results, say so and suggest refining filters.
+- If the user asks about subway access or distances, highlight those details from the listing data. Subway distance information is available in the listing data above - use it when answering questions about subway proximity.
 - Provide a succinct, helpful answer (2–5 sentences) and, when appropriate, suggest the next best question or adjustment.
 - If you mention any listing IDs, include them in referenced_listing_ids.
 """

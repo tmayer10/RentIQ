@@ -316,6 +316,16 @@ for msg in st.session_state["messages"]:
             if listing_ids:
                 images_data = get_listing_images_batch(listing_ids, max_images=5)
             display_with_images(msg["content"], structured_data, listing_ids, images_data)
+        elif msg.get("role") == "assistant":
+            # Assistant message without structured_data - try to extract listing IDs and display properly
+            # Extract listing IDs from content for potential image display
+            listing_ids = extract_listing_ids_from_text(msg["content"])
+            if listing_ids:
+                images_data = get_listing_images_batch(listing_ids, max_images=5)
+                display_with_images(msg["content"], None, listing_ids, images_data)
+            else:
+                # Regular message - render markdown properly (tables, formatting, etc.)
+                st.markdown(msg["content"], unsafe_allow_html=False)
         else:
             # Regular message - use unsafe_allow_html=False to prevent markdown interpretation issues
             st.markdown(msg["content"], unsafe_allow_html=False)
@@ -461,7 +471,14 @@ if user_query:
             "structured_data": structured_data_dict,
             "listing_ids": all_listing_ids
         }
-        st.session_state["messages"] = store.get_messages(session_id)
+        # Reload messages from Redis and merge metadata back
+        messages = store.get_messages(session_id)
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "assistant" and i in st.session_state["message_metadata"]:
+                metadata = st.session_state["message_metadata"][i]
+                msg["structured_data"] = metadata.get("structured_data")
+                msg["listing_ids"] = metadata.get("listing_ids", [])
+        st.session_state["messages"] = messages
     else:
         # Fall back to in-memory
         st.session_state["last_matches"] = matches
