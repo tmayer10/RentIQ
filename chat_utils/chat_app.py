@@ -272,35 +272,46 @@ def display_with_images(text: str, structured_data, listing_ids: list, images_da
                 route_distances = subway_info.get('route_distances', {})
                 subway_lines = subway_info.get('subway_lines', [])
                 subway_routes = subway_info.get('subway_routes', [])
+                subway_min_distance = subway_info.get('subway_min_distance')
                 
                 subway_display_parts = []
                 
-                # Show routes with distances if available
+                # Get unique subway routes - prefer from route_distances keys, fallback to subway_routes
+                unique_routes = set()
                 if route_distances:
-                    # Sort routes by distance and show top 3 closest
-                    sorted_routes = sorted(route_distances.items(), key=lambda x: x[1])[:3]
-                    route_parts = [f"{route.upper()} train ({dist:.2f} mi)" for route, dist in sorted_routes]
-                    subway_display_parts.extend(route_parts)
+                    unique_routes = set(route_distances.keys())
+                elif subway_routes:
+                    unique_routes = set([r.lower() for r in subway_routes])
                 
-                # Also show subway lines if available (without distances, as we don't have line-specific distances)
-                if subway_lines and not route_distances:
-                    # Format lines in title case
-                    lines_formatted = [format_title_case(line) for line in subway_lines[:3]]
-                    subway_display_parts.append(f"Lines: {', '.join(lines_formatted)}")
-                elif subway_lines and len(subway_display_parts) < 3:
-                    # Add lines info if we have space
-                    lines_formatted = [format_title_case(line) for line in subway_lines[:2]]
-                    subway_display_parts.append(f"Lines: {', '.join(lines_formatted)}")
-                
-                # Fallback: show routes without distances
-                if not subway_display_parts and subway_routes:
-                    if subway_info.get('subway_min_distance') is not None:
-                        min_dist = subway_info.get('subway_min_distance')
-                        routes_str = ', '.join([r.upper() for r in subway_routes[:3]])
-                        subway_display_parts.append(f"{routes_str} ({min_dist:.2f} mi)")
+                # Display unique subway routes
+                if unique_routes:
+                    routes_sorted = sorted([r.upper() for r in unique_routes])
+                    routes_str = ', '.join(routes_sorted)
+                    
+                    # If we have route_distances, show routes with their distances
+                    if route_distances:
+                        route_parts = []
+                        for route in routes_sorted:
+                            route_lower = route.lower()
+                            if route_lower in route_distances:
+                                dist = route_distances[route_lower]
+                                route_parts.append(f"{route} ({dist:.2f} mi)")
+                            else:
+                                route_parts.append(route)
+                        routes_display = ', '.join(route_parts)
                     else:
-                        routes_str = ', '.join([r.upper() for r in subway_routes[:3]])
-                        subway_display_parts.append(routes_str)
+                        routes_display = routes_str
+                    
+                    subway_display_parts.append(f"Routes: {routes_display}")
+                
+                # Always display minimum distance to subway station if available
+                if subway_min_distance is not None:
+                    subway_display_parts.append(f"Min Distance: {subway_min_distance:.2f} mi")
+                
+                # Also show subway lines if available (as supplementary info)
+                if subway_lines and not subway_display_parts:
+                    lines_formatted = [format_title_case(line) for line in subway_lines]
+                    subway_display_parts.append(f"Lines: {', '.join(lines_formatted)}")
                 
                 # Final fallback: use subway_info string
                 if not subway_display_parts and subway_info.get('subway_info'):
