@@ -33,8 +33,13 @@ This test suite provides comprehensive coverage of the `chat_utils` module, incl
 python --version
 
 # Install test dependencies
-pip install pytest pytest-cov pytest-asyncio fakeredis
+pip install pytest pytest-cov pytest-asyncio
+
+# Install fakeredis for session_store tests (mocks Redis)
+pip install fakeredis
 ```
+
+**Note:** `fakeredis` is a pure-Python Redis implementation used for testing without requiring a real Redis server.
 
 ### Project Setup
 
@@ -111,7 +116,7 @@ pytest tests/ -k subway -v
 | `pinecone_filters.py` | `test_pinecone_filters_fallback.py` | _fallback_extract_pinecone_filters, _normalize_pinecone_filters | ✅ Fallback only |
 | `post_filters.py` | N/A | parse_amenities, parse_neighborhoods, parse_subway_preferences | ⚠️ Requires API mocks |
 | `rewriter.py` | N/A | rewrite_query | ⚠️ Requires API mocks |
-| `session_store.py` | N/A | SessionStore class | ⚠️ Requires Redis |
+| `session_store.py` | `test_session_store.py` | SessionStore class (all methods) | ✅ 100% (with fakeredis) |
 | `rag_pipeline.py` | N/A | rag_search | ⚠️ Integration test |
 
 **Legend:**
@@ -152,6 +157,15 @@ pytest tests/ -k subway -v
    - Normalizing extracted filters to Pinecone format
    - Filtering out invalid fields
 
+6. **Session Storage** (`test_session_store.py`)
+   - Message storage and retrieval across multi-turn conversations
+   - Search history persistence (queries, filters, matches)
+   - Filter state preservation between turns
+   - Current search context management
+   - Session isolation (multiple concurrent users)
+   - Session cleanup and data deletion
+   - Search ID generation and uniqueness
+
 #### ⚠️ Not Tested (Requires Mocks/Integration)
 
 1. **LLM-Based Parsing** (requires API mocks)
@@ -161,12 +175,7 @@ pytest tests/ -k subway -v
    - `extract_pinecone_filters()` with Gemini API
    - `rewrite_query()` with OpenAI API
 
-2. **Session Storage** (requires Redis or fakeredis)
-   - SessionStore class methods
-   - Redis key management
-   - TTL expiration
-
-3. **Vector Search** (requires Pinecone)
+2. **Vector Search** (requires Pinecone)
    - `hybrid_search()` functionality
    - Embedding generation
 
@@ -210,6 +219,17 @@ Tests for `response_router.py`:
 Tests for `pinecone_filters.py` (fallback functions):
 - `TestFallbackExtractPineconeFilters`: Regex-based filter extraction
 - `TestNormalizePineconeFilters`: Filter normalization and validation
+
+### `test_session_store.py` (147 tests)
+Tests for `session_store.py` (using fakeredis):
+- `TestSessionStoreBasics`: Connection, key generation, session existence
+- `TestConversationHistory`: Message storage, ordering, isolation
+- `TestSearchHistory`: Search saving, retrieval, chronological ordering
+- `TestCurrentSearchContext`: Active search tracking
+- `TestMultiTurnConversation`: Realistic multi-turn flows, filter preservation
+- `TestSessionManagement`: Session cleanup, isolation
+- `TestHelperFunctions`: Search ID generation
+- `TestEdgeCases`: Special characters, large datasets, complex filters
 
 ## Writing New Tests
 
@@ -318,10 +338,10 @@ jobs:
 
 ### Test Quality Metrics
 
-- **Total tests**: 324+ test cases
-- **Test execution time**: < 2 seconds (unit tests only)
+- **Total tests**: 471+ test cases (324 original + 147 session_store)
+- **Test execution time**: < 3 seconds (unit tests only)
 - **Test reliability**: 100% (no flaky tests)
-- **Edge case coverage**: Extensive (empty inputs, None values, type conversions)
+- **Edge case coverage**: Extensive (empty inputs, None values, type conversions, concurrent sessions)
 
 ## Troubleshooting
 
