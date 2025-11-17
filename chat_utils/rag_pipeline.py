@@ -13,9 +13,44 @@ import asyncio
 from response_router import decide_response_type
 from filters_change import have_filters_changed
 from scorer import score_listings
+from pydantic import BaseModel, Field
+from typing import List, Optional
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+# Pydantic models for structured listing recommendations
+class ListingRecommendation(BaseModel):
+    """Structured representation of a single listing recommendation."""
+    listing_id: str = Field(description="The listing ID (e.g., '4883693')")
+    price: float = Field(description="The monthly rent price")
+    bedrooms: int = Field(description="Number of bedrooms")
+    bathrooms: float = Field(description="Number of bathrooms")
+    neighborhood: str = Field(description="Neighborhood name")
+    amenities: List[str] = Field(default_factory=list, description="List of amenities")
+    summary: str = Field(description="Brief summary explaining why this listing matches the user's needs")
+
+
+class StructuredListingResponse(BaseModel):
+    """Structured response for new search queries with ranked listings."""
+    listings: List[ListingRecommendation] = Field(
+        default_factory=list,
+        description="Ranked list of listing recommendations from most to least relevant"
+    )
+    final_recommendation: Optional[str] = Field(
+        None,
+        description="Brief final recommendation or summary (optional)"
+    )
+
+
+class ConversationalResponse(BaseModel):
+    """Structured response for conversational follow-ups."""
+    response: str = Field(description="Natural conversational response to the user's query")
+    referenced_listing_ids: List[str] = Field(
+        default_factory=list,
+        description="List of listing IDs mentioned in the response (if any)"
+    )
 
 
 def format_listings(matches):
@@ -243,13 +278,16 @@ Here are the top {top_k} listings retrieved from our database for this turn:
 
 TASK:
 - Provide a ranked list from most to least relevant.
-- For each listing: summarize key selling points and match with the user's needs (from history and this turn).
-- Be concise but informative.
-- End with a brief final recommendation.
-- If this is an UPDATED search (user changed requirements), acknowledge what changed.
+- For each listing: include the exact listing_id, price, bedrooms, bathrooms, neighborhood, amenities, and a summary explaining why it matches the user's needs.
+- Be concise but informative in the summaries.
+- Optionally include a final_recommendation with overall guidance.
+- If this is an UPDATED search (user changed requirements), acknowledge what changed in the final_recommendation.
 
-Output only the recommendation list and summary.
+IMPORTANT: Use the exact listing_id values from the context above. Include all amenities from the listing data.
 """
+        # Use structured output for new searches
+        use_structured = True
+        schema_model = StructuredListingResponse
     else:
         current_user_prompt = f"""
 You are continuing an ongoing conversation. Answer naturally and concisely while grounding strictly in the retrieved listings for this turn.
@@ -264,19 +302,52 @@ Guidelines:
 - Keep a conversational tone. Avoid rigid ranking formatting unless explicitly requested.
 - Reference prior preferences when relevant. If a referred listing is not in the current results, say so and suggest refining filters.
 - Provide a succinct, helpful answer (2–5 sentences) and, when appropriate, suggest the next best question or adjustment.
+- If you mention any listing IDs, include them in referenced_listing_ids.
 """
+        # Use structured output for conversational responses too
+        use_structured = True
+        schema_model = ConversationalResponse
 
     messages = [system_msg]
     messages.extend(history_messages)
     messages.append({"role": "user", "content": current_user_prompt})
 
-    # Step 8: Call LLM
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0.3,
-    )
-    llm_output = response.choices[0].message.content.strip()
+    # Step 8: Call LLM with structured output
+    try:
+        completion = await call_llm_with_limit(
+            messages=messages,
+            model_name="gpt-4o-mini",
+            schema_model=schema_model if use_structured else None,
+            temperature=0.3
+        )
+        
+        if use_structured:
+            parsed = completion.choices[0].message.parsed
+            # Convert structured output to formatted text for display
+            if isinstance(parsed, StructuredListingResponse):
+                llm_output = _format_structured_listings(parsed)
+                structured_data = parsed
+            elif isinstance(parsed, ConversationalResponse):
+                llm_output = parsed.response
+                structured_data = {"referenced_listing_ids": parsed.referenced_listing_ids}
+            else:
+                # Fallback to text content if parsing failed
+                llm_output = completion.choices[0].message.content.strip()
+                structured_data = None
+        else:
+            llm_output = completion.choices[0].message.content.strip()
+            structured_data = None
+    except Exception as e:
+        print(f"[WARN] Structured output failed: {e}. Falling back to text generation.")
+        # Fallback to regular text generation
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.3,
+        )
+        llm_output = response.choices[0].message.content.strip()
+        structured_data = None
 
     # Step 9: Package complete filter state (hard + soft filters)
     filter_state = {
@@ -286,4 +357,23 @@ Guidelines:
         "subway": subway_prefs
     }
 
-    return llm_output, matches, clarification, filter_state
+    return llm_output, matches, clarification, filter_state, structured_data
+
+
+def _format_structured_listings(parsed: StructuredListingResponse) -> str:
+    """Convert structured listing response to formatted text for display."""
+    lines = []
+    
+    for listing in parsed.listings:
+        lines.append(f"ID: {listing.listing_id}")
+        lines.append(f"Price: ${listing.price}")
+        lines.append(f"Bedrooms: {listing.bedrooms}, Bathrooms: {listing.bathrooms}")
+        lines.append(f"Neighborhood: {listing.neighborhood}")
+        lines.append(f"Amenities: {', '.join(listing.amenities)}")
+        lines.append(f"Summary: {listing.summary}")
+        lines.append("")  # Empty line between listings
+    
+    if parsed.final_recommendation:
+        lines.append(parsed.final_recommendation)
+    
+    return "\n".join(lines)

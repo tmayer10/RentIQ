@@ -17,6 +17,11 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   # Django Backend
   backend:
     build: ./backend
@@ -28,6 +33,7 @@ services:
     volumes:
       - ./backend:/app
       - ./EDA:/data/EDA
+      - ./chat_utils:/app/chat_utils
     ports:
       - "8000:8000"
     environment:
@@ -35,11 +41,41 @@ services:
       - DATABASE_NAME=rentiq_db
       - DATABASE_USER=rentiq_user
       - DATABASE_PASSWORD=RentIQ2025!
+      - REDIS_URL=${REDIS_URL}
+      - PYTHONPATH=/app/chat_utils:/app
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
     stdin_open: true
     tty: true
+
+  streamlit:
+    image: rentiq-backend:latest     # reuse backend image after build
+    build: ./backend                 # ensures Streamlit and deps are installed
+    command: >
+      sh -c "streamlit run /app/chat_utils/chat_app.py --server.address=0.0.0.0 --server.port=8501"
+    volumes:
+      - ./backend:/app
+      - ./chat_utils:/app/chat_utils
+    environment:
+      - DATABASE_HOST=db
+      - DATABASE_NAME=rentiq_db
+      - DATABASE_USER=rentiq_user
+      - DATABASE_PASSWORD=RentIQ2025!
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app/chat_utils:/app
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - HF_TOKEN=${HF_TOKEN}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_INDEX_NAME=${PINECONE_INDEX_NAME}
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+      - redis
 
 volumes:
   postgres_data:

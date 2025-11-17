@@ -7,7 +7,7 @@ from vectorstore import splade_encode, dense_model, get_index, INDEX_DIM
 
 load_dotenv()
 
-BATCH_SIZE = 100
+BATCH_SIZE = 500
 
 def ingest_listings():
     rows = fetch_listings()

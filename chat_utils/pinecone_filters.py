@@ -13,8 +13,15 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from rate_limiter import call_llm_with_limit
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError as e:
+    raise ImportError(
+        "Failed to import 'genai' from 'google'. "
+        "Please ensure 'google-genai' package is installed: pip install google-genai>=1.0.0. "
+        "If running in Docker, rebuild the image: docker-compose build --no-cache"
+    ) from e
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
