@@ -7,7 +7,8 @@ These filters are applied AFTER Pinecone retrieval to enable more nuanced, LLM-a
 import os
 import re
 import asyncio
-from typing import List, Dict, Any, Optional
+import json
+from typing import List, Dict, Any, Optional, Literal
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -16,18 +17,30 @@ from allowable_values import (
     AMENITY_SYNONYMS, NEIGHBORHOOD_ALIASES
 )
 from rate_limiter import call_llm_with_limit
-try:
-    from google import genai
-    from google.genai import types
-except ImportError as e:
-    raise ImportError(
-        "Failed to import 'genai' from 'google'. "
-        "Please ensure 'google-genai' package is installed: pip install google-genai>=1.0.0. "
-        "If running in Docker, rebuild the image: docker-compose build --no-cache"
-    ) from e
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Lazy import for Google - only when needed
+_google_genai = None
+_google_types = None
+
+def _get_google_client():
+    """Lazy import and initialization of Google GenAI client."""
+    global _google_genai, _google_types
+    if _google_genai is None:
+        try:
+            from google import genai
+            from google.genai import types
+            _google_genai = genai
+            _google_types = types
+        except ImportError as e:
+            raise ImportError(
+                "Failed to import 'genai' from 'google'. "
+                "Please ensure 'google-genai' package is installed: pip install google-genai>=1.0.0. "
+                "If running in Docker, rebuild the image: docker-compose build --no-cache"
+            ) from e
+    return _google_genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 
 # Pydantic models for structured outputs
@@ -67,10 +80,14 @@ class SubwayPreferencesResponse(BaseModel):
     )
 
 
-async def parse_amenities(user_query: str) -> List[str]:
+async def parse_amenities(user_query: str, provider: Literal["google", "openai"] = "google") -> List[str]:
     """
     Extract amenity requirements from user query and map to canonical amenity list.
     Uses Pydantic-enforced structured output for robust parsing.
+    
+    Args:
+        user_query: The user's search query
+        provider: Which LLM provider to use ('google' or 'openai'), default 'google'
     
     Returns:
         List of canonical amenity strings from AMENITIES list
@@ -97,27 +114,36 @@ Rules:
 
 User query: "{user_query}"
 
-Extract amenities:"""
-
-    #messages = [{"role": "user", "content": prompt}]
+Extract amenities and return ONLY valid JSON matching this schema:
+{{
+  "amenities": ["amenity1", "amenity2", ...]
+}}"""
 
     try:
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-        # Run synchronously in a thread so async code can await
-        response = client.models.generate_content(
+        if provider == "google":
+            client = _get_google_client()
+            response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                system_instruction ="""You are an expert at extracting structured data from user queries.
-                You always respond with valid JSON that adheres to the provided schema.""",
-                response_mime_type="application/json",
-                response_schema= AmenitiesResponse,
+                config=_google_types.GenerateContentConfig(
+                    system_instruction="""You are an expert at extracting structured data from user queries.
+                    You always respond with valid JSON that adheres to the provided schema.""",
+                    response_mime_type="application/json",
+                    response_schema=AmenitiesResponse,
                 ),
             )
-
-        # `response.parsed` is already a NeighborhoodsResponse object
-        parsed = response.parsed
+            parsed = response.parsed
+        else:  # openai
+            response = openai_client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert at extracting structured data from user queries. You always respond with valid JSON that adheres to the provided schema."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=AmenitiesResponse,
+                temperature=0
+            )
+            parsed = response.choices[0].message.parsed
         
         # Validate: only keep items that are in the canonical list
         validated = [a for a in parsed.amenities if a in AMENITIES]
@@ -152,10 +178,14 @@ def _fallback_parse_amenities(user_query: str) -> List[str]:
     return list(found)
 
 
-async def parse_neighborhoods(user_query: str) -> List[str]:
+async def parse_neighborhoods(user_query: str, provider: Literal["google", "openai"] = "google") -> List[str]:
     """
     Extract neighborhood preferences from user query and map to canonical neighborhood list.
     Uses Pydantic-enforced structured output. Handles landmarks (NYU -> East Village).
+    
+    Args:
+        user_query: The user's search query
+        provider: Which LLM provider to use ('google' or 'openai'), default 'google'
     
     Returns:
         List of canonical neighborhood strings from NEIGHBORHOODS list
@@ -183,27 +213,36 @@ Rules:
 
 User query: "{user_query}"
 
-Extract neighborhoods:"""
-
-    #messages = [{"role": "user", "content": prompt}]
+Extract neighborhoods and return ONLY valid JSON matching this schema:
+{{
+  "neighborhoods": ["neighborhood1", "neighborhood2", ...]
+}}"""
 
     try:
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-        # Run synchronously in a thread so async code can await
-        response = client.models.generate_content(
+        if provider == "google":
+            client = _get_google_client()
+            response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                system_instruction ="""You are an expert at extracting structured data from user queries.
-                You always respond with valid JSON that adheres to the provided schema.""",
-                response_mime_type="application/json",
-                response_schema= NeighborhoodsResponse,
+                config=_google_types.GenerateContentConfig(
+                    system_instruction="""You are an expert at extracting structured data from user queries.
+                    You always respond with valid JSON that adheres to the provided schema.""",
+                    response_mime_type="application/json",
+                    response_schema=NeighborhoodsResponse,
                 ),
             )
-
-        # `response.parsed` is already a NeighborhoodsResponse object
-        parsed = response.parsed
+            parsed = response.parsed
+        else:  # openai
+            response = openai_client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert at extracting structured data from user queries. You always respond with valid JSON that adheres to the provided schema."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=NeighborhoodsResponse,
+                temperature=0
+            )
+            parsed = response.choices[0].message.parsed
         
         # Validate
         validated = [n for n in parsed.neighborhoods if n in NEIGHBORHOODS]
@@ -239,10 +278,14 @@ def _fallback_parse_neighborhoods(user_query: str) -> List[str]:
     return list(found)
 
 
-async def parse_subway_preferences(user_query: str) -> Dict[str, Any]:
+async def parse_subway_preferences(user_query: str, provider: Literal["google", "openai"] = "google") -> Dict[str, Any]:
     """
     Extract subway route/line preferences and distance constraints.
     Uses Pydantic-enforced structured output.
+    
+    Args:
+        user_query: The user's search query
+        provider: Which LLM provider to use ('google' or 'openai'), default 'google'
     
     Returns:
         Dict with keys:
@@ -274,27 +317,39 @@ Rules:
 
 User query: "{user_query}"
 
-Extract subway preferences:"""
-
-    #messages = [{"role": "user", "content": prompt}]
+Extract subway preferences and return ONLY valid JSON matching this schema:
+{{
+  "routes": ["route1", "route2", ...],
+  "lines": ["line1", "line2", ...],
+  "min_distance": 0.5,
+  "max_distance": 1.0
+}}"""
 
     try:
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-        # Run synchronously in a thread so async code can await
-        response = client.models.generate_content(
+        if provider == "google":
+            client = _get_google_client()
+            response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                system_instruction ="""You are an expert at extracting structured data from user queries.
-                You always respond with valid JSON that adheres to the provided schema.""",
-                response_mime_type="application/json",
-                response_schema= SubwayPreferencesResponse,
+                config=_google_types.GenerateContentConfig(
+                    system_instruction="""You are an expert at extracting structured data from user queries.
+                    You always respond with valid JSON that adheres to the provided schema.""",
+                    response_mime_type="application/json",
+                    response_schema=SubwayPreferencesResponse,
                 ),
             )
-
-        # `response.parsed` is already a NeighborhoodsResponse object
-        parsed = response.parsed
+            parsed = response.parsed
+        else:  # openai
+            response = openai_client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert at extracting structured data from user queries. You always respond with valid JSON that adheres to the provided schema."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=SubwayPreferencesResponse,
+                temperature=0
+            )
+            parsed = response.choices[0].message.parsed
        
         # Validate and normalize
         result = {
@@ -457,12 +512,14 @@ async def apply_post_retrieval_filters(
     """
 
     # --- Parse filters if not provided ---
+    # Note: provider parameter would need to be passed through from rag_pipeline
+    # For now, defaulting to 'google' for backward compatibility
     if amenities is None:
-        amenities = await parse_amenities(user_query)
+        amenities = await parse_amenities(user_query, provider="google")
     if neighborhoods is None:
-        neighborhoods = await parse_neighborhoods(user_query)
+        neighborhoods = await parse_neighborhoods(user_query, provider="google")
     if subway_prefs is None:
-        subway_prefs = await parse_subway_preferences(user_query)
+        subway_prefs = await parse_subway_preferences(user_query, provider="google")
 
     ## --- Build filter conditions ---
 
@@ -592,8 +649,15 @@ async def apply_post_retrieval_filters(
     output = []
 
     for match in matches:
-        metadata = match.metadata
-        pinecone_score = getattr(match, "score", 0)
+        # Handle both dict format (from Redis) and object format (from Pinecone)
+        if isinstance(match, dict):
+            metadata = match.get("metadata", {})
+            pinecone_score = match.get("score", 0)
+            match_id = match.get("id")
+        else:
+            metadata = match.metadata
+            pinecone_score = getattr(match, "score", 0)
+            match_id = getattr(match, "id", None)
 
         # Hard filters gate (currently empty unless set above)
         if hard_filters and not matches_filter(metadata, hard_filters):
@@ -604,7 +668,7 @@ async def apply_post_retrieval_filters(
         combined_score = pinecone_score + (boost_score * boost_weight)
 
         output.append({
-            "id": getattr(match, "id", None),
+            "id": match_id,
             "metadata": metadata,
             "pinecone_score": pinecone_score,
             "boost_score": boost_score,

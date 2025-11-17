@@ -119,6 +119,7 @@ async def rag_search(
     is_first_turn: bool = False,
     previous_filters: dict = None,
     previous_matches=None,
+    filter_provider: str = "google",
 ):
     """Full RAG with optional chat history.
 
@@ -132,7 +133,7 @@ async def rag_search(
     standalone_query = rewrite_query(user_query, chat_history or [])
 
     # Step 1: Extract simple Pinecone pre-filters (price, bed, bath, sqft, zipcode ONLY)
-    pinecone_filters = await extract_pinecone_filters(standalone_query)
+    pinecone_filters = await extract_pinecone_filters(standalone_query, provider=filter_provider)
     
     # Step 1.5: Decide response type (general vs index_query)
     response_type = decide_response_type(user_query)
@@ -143,9 +144,9 @@ async def rag_search(
     # Step 2: Parse post-retrieval filter criteria (neighborhoods, amenities, subway) concurrently
     try:
         amenities, neighborhoods, subway_prefs = await asyncio.gather(
-            parse_amenities(standalone_query),
-            parse_neighborhoods(standalone_query),
-            parse_subway_preferences(standalone_query)
+            parse_amenities(standalone_query, provider=filter_provider),
+            parse_neighborhoods(standalone_query, provider=filter_provider),
+            parse_subway_preferences(standalone_query, provider=filter_provider)
         )
 
         # Defaults if any come back as None

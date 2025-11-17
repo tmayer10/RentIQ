@@ -13,18 +13,30 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from rate_limiter import call_llm_with_limit
-try:
-    from google import genai
-    from google.genai import types
-except ImportError as e:
-    raise ImportError(
-        "Failed to import 'genai' from 'google'. "
-        "Please ensure 'google-genai' package is installed: pip install google-genai>=1.0.0. "
-        "If running in Docker, rebuild the image: docker-compose build --no-cache"
-    ) from e
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Lazy import for Google - only when needed
+_google_genai = None
+_google_types = None
+
+def _get_google_client():
+    """Lazy import and initialization of Google GenAI client."""
+    global _google_genai, _google_types
+    if _google_genai is None:
+        try:
+            from google import genai
+            from google.genai import types
+            _google_genai = genai
+            _google_types = types
+        except ImportError as e:
+            raise ImportError(
+                "Failed to import 'genai' from 'google'. "
+                "Please ensure 'google-genai' package is installed: pip install google-genai>=1.0.0. "
+                "If running in Docker, rebuild the image: docker-compose build --no-cache"
+            ) from e
+    return _google_genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 
 # Simpler approach: separate models for each operator type
@@ -114,38 +126,45 @@ User query: "{user_query}"
 Extract ONLY mentioned filters."""
 
 
-async def extract_pinecone_filters(user_query: str) -> Dict[str, Any]:
+async def extract_pinecone_filters(user_query: str, provider: Literal["google", "openai"] = "google") -> Dict[str, Any]:
     """
     Extract simple Pinecone metadata filters (price, bed, bath, sqft, zipcode only).
     Uses Pydantic models for structured output.
     
     Args:
         user_query: The user's search query
-        model_name: OpenAI model to use (default: gpt-4o-mini)
+        provider: Which LLM provider to use ('google' or 'openai'), default 'google'
     
     Returns:
         Dict with Pinecone-compatible filter structure
     """
     prompt = build_pinecone_filter_prompt(user_query)
-    #messages = [{"role": "user", "content": prompt}]
     
     try:
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-        # Run synchronously in a thread so async code can await
-        response = client.models.generate_content(
+        if provider == "google":
+            client = _get_google_client()
+            response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                system_instruction ="""You are an expert at extracting structured data from user queries.
-                You always respond with valid JSON that adheres to the provided schema.""",
-                response_mime_type="application/json",
-                response_schema= PineconeFiltersResponse,
+                config=_google_types.GenerateContentConfig(
+                    system_instruction="""You are an expert at extracting structured data from user queries.
+                    You always respond with valid JSON that adheres to the provided schema.""",
+                    response_mime_type="application/json",
+                    response_schema=PineconeFiltersResponse,
                 ),
             )
-
-        # `response.parsed` is already a NeighborhoodsResponse object
-        parsed = response.parsed
+            parsed = response.parsed
+        else:  # openai
+            response = openai_client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert at extracting structured data from user queries. You always respond with valid JSON that adheres to the provided schema."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=PineconeFiltersResponse,
+                temperature=0
+            )
+            parsed = response.choices[0].message.parsed
 
         # Convert Pydantic model to Pinecone filter dict with mention gating and range handling
         filters = _pydantic_to_pinecone_filters(parsed, user_query)

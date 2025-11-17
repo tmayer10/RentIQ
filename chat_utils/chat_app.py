@@ -454,6 +454,7 @@ else:
 
 # Sidebar controls
 top_k = st.sidebar.slider("Number of top listings to consider", min_value=3, max_value=10, value=5)
+filter_provider = st.sidebar.selectbox("Filter extraction provider", ["google", "openai"], index=0, help="Choose which LLM provider to use for filter extraction")
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Start New Search", help="Clear conversation history and start fresh"):
@@ -508,7 +509,7 @@ user_query = st.chat_input("Ask about apartments, neighborhoods, prices, or foll
 
 executor = ThreadPoolExecutor(max_workers=8)  # adjust parallelism
 
-def run_rag_search_sync(user_query, top_k, chat_history, is_first_turn, previous_filters, previous_matches):
+def run_rag_search_sync(user_query, top_k, chat_history, is_first_turn, previous_filters, previous_matches, filter_provider="google"):
     """Run the async rag_search inside a background thread and return results."""
     return asyncio.run(
         rag_search(user_query, 
@@ -516,7 +517,8 @@ def run_rag_search_sync(user_query, top_k, chat_history, is_first_turn, previous
                    chat_history=chat_history, 
                    is_first_turn=is_first_turn,
                    previous_filters=previous_filters,
-                   previous_matches=previous_matches)
+                   previous_matches=previous_matches,
+                   filter_provider=filter_provider)
     )
 
 if user_query:
@@ -553,7 +555,8 @@ if user_query:
         history_for_llm,
         is_first_turn,
         previous_filters,  # Pass previous filters (complete state)
-        previous_matches    # Pass previous matches
+        previous_matches,  # Pass previous matches
+        filter_provider    # Pass filter provider selection
     )
     llm_output, matches, clarification, filter_state, structured_data = future.result()
 
@@ -645,12 +648,22 @@ if user_query:
     if use_redis and store:
         # Save to Redis
         search_id = generate_search_id()
+        # Convert matches to dict format, handling both dict and object formats
+        matches_dict = []
+        if matches:
+            for m in matches:
+                if isinstance(m, dict):
+                    # Already a dict, use as-is
+                    matches_dict.append(m)
+                else:
+                    # Object with metadata and score attributes
+                    matches_dict.append({"metadata": m.metadata, "score": m.score})
         store.save_search(
             session_id=session_id,
             search_id=search_id,
             query=user_query,
             filter_state=filter_state,
-            matches=[{"metadata": m.metadata, "score": m.score} for m in matches] if matches else [],
+            matches=matches_dict,
         )
         store.set_current_search_id(session_id, search_id)
         # Store message with metadata - need to extend add_message or store separately
