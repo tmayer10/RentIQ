@@ -1,0 +1,64 @@
+# RentIQ Streamlit Chat Interface Systemd Service
+# Install location: /etc/systemd/system/rentiq-streamlit.service
+#
+# Enable: sudo systemctl enable rentiq-streamlit
+# Start: sudo systemctl start rentiq-streamlit
+# Status: sudo systemctl status rentiq-streamlit
+# Logs: sudo journalctl -u rentiq-streamlit -f
+
+[Unit]
+Description=RentIQ Streamlit Chat Interface
+Documentation=https://github.com/yourusername/RentIQ
+After=network.target rentiq-gunicorn.service
+Wants=rentiq-gunicorn.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/RentIQ/streamlit_app
+
+# Environment variables
+EnvironmentFile=/home/ubuntu/RentIQ/.env
+Environment="PATH=/home/ubuntu/RentIQ/venv/bin"
+Environment="PYTHONPATH=/home/ubuntu/RentIQ"
+
+# Streamlit command
+ExecStart=/home/ubuntu/RentIQ/venv/bin/streamlit run \
+    /home/ubuntu/RentIQ/streamlit_app/app.py \
+    --server.port 8501 \
+    --server.address 0.0.0.0 \
+    --server.headless true \
+    --server.enableCORS false \
+    --server.enableXsrfProtection true \
+    --browser.gatherUsageStats false \
+    --logger.level info
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=300s
+StartLimitBurst=5
+
+# Process management
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/RentIQ /var/log/rentiq
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=2048
+
+# Standard output/error logging
+StandardOutput=append:/var/log/rentiq/streamlit_stdout.log
+StandardError=append:/var/log/rentiq/streamlit_stderr.log
+
+[Install]
+WantedBy=multi-user.target

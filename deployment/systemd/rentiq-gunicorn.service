@@ -1,0 +1,64 @@
+# RentIQ Django/Gunicorn Systemd Service
+# Install location: /etc/systemd/system/rentiq-gunicorn.service
+#
+# Enable: sudo systemctl enable rentiq-gunicorn
+# Start: sudo systemctl start rentiq-gunicorn
+# Status: sudo systemctl status rentiq-gunicorn
+# Logs: sudo journalctl -u rentiq-gunicorn -f
+
+[Unit]
+Description=RentIQ Django Application (Gunicorn)
+Documentation=https://github.com/yourusername/RentIQ
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+Type=notify
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/RentIQ
+
+# Environment variables (load from .env file)
+EnvironmentFile=/home/ubuntu/RentIQ/.env
+Environment="PATH=/home/ubuntu/RentIQ/venv/bin"
+Environment="PYTHONPATH=/home/ubuntu/RentIQ"
+Environment="DJANGO_SETTINGS_MODULE=backend.settings"
+
+# Gunicorn command
+ExecStart=/home/ubuntu/RentIQ/venv/bin/gunicorn \
+    --config /home/ubuntu/RentIQ/deployment/gunicorn.conf.py \
+    --bind 127.0.0.1:8000 \
+    --workers 4 \
+    --threads 2 \
+    --timeout 120 \
+    --worker-class sync \
+    --worker-tmp-dir /dev/shm \
+    --access-logfile /var/log/rentiq/gunicorn_access.log \
+    --error-logfile /var/log/rentiq/gunicorn_error.log \
+    --log-level info \
+    backend.wsgi:application
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=300s
+StartLimitBurst=5
+
+# Process management
+KillMode=mixed
+KillSignal=SIGQUIT
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/RentIQ /var/log/rentiq /var/run/rentiq
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

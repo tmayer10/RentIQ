@@ -1,0 +1,225 @@
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "cwagent",
+    "region": "us-east-1"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/rentiq/gunicorn_access.log",
+            "log_group_name": "/aws/ec2/rentiq/gunicorn/access",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/rentiq/gunicorn_error.log",
+            "log_group_name": "/aws/ec2/rentiq/gunicorn/error",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/rentiq/streamlit_supervisor_stdout.log",
+            "log_group_name": "/aws/ec2/rentiq/streamlit/stdout",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/rentiq/streamlit_supervisor_stderr.log",
+            "log_group_name": "/aws/ec2/rentiq/streamlit/stderr",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/nginx/api_access.log",
+            "log_group_name": "/aws/ec2/rentiq/nginx/api_access",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/nginx/api_error.log",
+            "log_group_name": "/aws/ec2/rentiq/nginx/api_error",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/nginx/chat_access.log",
+            "log_group_name": "/aws/ec2/rentiq/nginx/chat_access",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/nginx/chat_error.log",
+            "log_group_name": "/aws/ec2/rentiq/nginx/chat_error",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/syslog",
+            "log_group_name": "/aws/ec2/rentiq/syslog",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 7,
+            "timezone": "UTC"
+          }
+        ]
+      }
+    },
+    "log_stream_name": "{instance_id}"
+  },
+  "metrics": {
+    "namespace": "RentIQ/EC2",
+    "metrics_collected": {
+      "cpu": {
+        "measurement": [
+          {
+            "name": "cpu_usage_idle",
+            "rename": "CPU_IDLE",
+            "unit": "Percent"
+          },
+          {
+            "name": "cpu_usage_iowait",
+            "rename": "CPU_IOWAIT",
+            "unit": "Percent"
+          },
+          "cpu_time_guest"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "*"
+        ],
+        "totalcpu": false
+      },
+      "disk": {
+        "measurement": [
+          {
+            "name": "used_percent",
+            "rename": "DISK_USED",
+            "unit": "Percent"
+          },
+          {
+            "name": "free",
+            "rename": "DISK_FREE",
+            "unit": "Gigabytes"
+          }
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "/"
+        ]
+      },
+      "diskio": {
+        "measurement": [
+          {
+            "name": "io_time",
+            "rename": "DISK_IO_TIME",
+            "unit": "Milliseconds"
+          },
+          {
+            "name": "write_bytes",
+            "rename": "DISK_WRITE_BYTES",
+            "unit": "Bytes"
+          },
+          {
+            "name": "read_bytes",
+            "rename": "DISK_READ_BYTES",
+            "unit": "Bytes"
+          },
+          {
+            "name": "writes",
+            "rename": "DISK_WRITES",
+            "unit": "Count"
+          },
+          {
+            "name": "reads",
+            "rename": "DISK_READS",
+            "unit": "Count"
+          }
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "*"
+        ]
+      },
+      "mem": {
+        "measurement": [
+          {
+            "name": "mem_used_percent",
+            "rename": "MEM_USED",
+            "unit": "Percent"
+          },
+          {
+            "name": "mem_available",
+            "rename": "MEM_AVAILABLE",
+            "unit": "Megabytes"
+          }
+        ],
+        "metrics_collection_interval": 60
+      },
+      "netstat": {
+        "measurement": [
+          {
+            "name": "tcp_established",
+            "rename": "TCP_ESTABLISHED",
+            "unit": "Count"
+          },
+          {
+            "name": "tcp_time_wait",
+            "rename": "TCP_TIME_WAIT",
+            "unit": "Count"
+          }
+        ],
+        "metrics_collection_interval": 60
+      },
+      "swap": {
+        "measurement": [
+          {
+            "name": "swap_used_percent",
+            "rename": "SWAP_USED",
+            "unit": "Percent"
+          }
+        ],
+        "metrics_collection_interval": 60
+      },
+      "processes": {
+        "measurement": [
+          {
+            "name": "running",
+            "rename": "PROCESSES_RUNNING",
+            "unit": "Count"
+          },
+          {
+            "name": "sleeping",
+            "rename": "PROCESSES_SLEEPING",
+            "unit": "Count"
+          },
+          {
+            "name": "dead",
+            "rename": "PROCESSES_DEAD",
+            "unit": "Count"
+          }
+        ]
+      }
+    },
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}",
+      "InstanceType": "${aws:InstanceType}",
+      "ImageId": "${aws:ImageId}",
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+    },
+    "aggregation_dimensions": [
+      ["InstanceId"],
+      ["InstanceType"],
+      ["InstanceId", "InstanceType"]
+    ]
+  }
+}
