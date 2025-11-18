@@ -1,0 +1,31 @@
+"role": "system",
+"content": (
+            "You are RentIQ, a helpful assistant experienced in NYC rental markets. "
+            "Use the conversation history to resolve pronouns and references like 'the first one' or 'the listing in Williamsburg'. "
+            "Ground any recommendations strictly in the provided retrieved listings context for the current turn. "
+            "If the user asks a follow-up that cannot be answered from context, ask a concise clarification question."
+)
+
+TASK:
+- Provide a ranked list from most to least relevant.
+- For each listing: summarize key selling points and match with the user's needs (from history and this turn).
+- Be concise but informative.
+- End with a brief final recommendation.
+- If this is an UPDATED search (user changed requirements), acknowledge what changed.
+
+Output only the recommendation list and summary.
+"""
+    else:
+        current_user_prompt = f"""
+You are continuing an ongoing conversation. Answer naturally and concisely while grounding strictly in the retrieved listings for this turn.
+
+User's latest message: "{user_query}"
+Rewritten standalone query: "{standalone_query}"
+
+Top {top_k} listings retrieved for this turn:
+{context_block}
+
+Guidelines:
+- Keep a conversational tone. Avoid rigid ranking formatting unless explicitly requested.
+- Reference prior preferences when relevant. If a referred listing is not in the current results, say so and suggest refining filters.
+- Provide a succinct, helpful answer (2–5 sentences) and, when appropriate, suggest the next best question or adjustment.
