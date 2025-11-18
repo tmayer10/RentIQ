@@ -35,10 +35,19 @@ def sanitize_metadata(metadata: dict) -> dict:
     return clean
 
 def deduplicate_matches(matches):
+    """Remove duplicate matches by listing_id.
+    
+    Handles both dict format (from Redis) and object format (from Pinecone).
+    """
     seen_ids = set()
     unique_matches = []
     for match in matches:
-        listing_id = match.metadata.get("listing_id")
+        # Handle both dict format and object format
+        if isinstance(match, dict):
+            md = match.get("metadata", {})
+        else:
+            md = match.metadata
+        listing_id = md.get("listing_id")
         if listing_id not in seen_ids:
             seen_ids.add(listing_id)
             unique_matches.append(match)

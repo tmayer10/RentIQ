@@ -79,7 +79,10 @@ AMENITIES = [
     "waterfront",
     "waterview",
     "wheelchair_access",
-    "wood_fireplace"
+    "wood_fireplace",
+    "business_room",
+    "guarantor_ok",
+    "room_tennis"
 ]
 
 # All neighborhoods in Manhattan
@@ -133,7 +136,9 @@ NEIGHBORHOODS = [
     "west-chelsea",
     "west-harlem",
     "west-village",
-    "yorkville"
+    "yorkville",
+    "central-park-south",
+    "marble-hill"
 ]
 
 # All subway routes

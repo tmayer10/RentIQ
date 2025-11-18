@@ -13,3 +13,7 @@ transformers
 torch
 streamlit
 deepeval
+redis>=5.0.0  # Redis client for session storage
+rich
+google-genai>=1.0.0,<2.0.0
+pydantic>=2.6.0

@@ -7,7 +7,8 @@ These filters are applied AFTER Pinecone retrieval to enable more nuanced, LLM-a
 import os
 import re
 import asyncio
-from typing import List, Dict, Any, Optional
+import json
+from typing import List, Dict, Any, Optional, Literal
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -16,11 +17,30 @@ from allowable_values import (
     AMENITY_SYNONYMS, NEIGHBORHOOD_ALIASES
 )
 from rate_limiter import call_llm_with_limit
-from google import genai
-from google.genai import types
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Lazy import for Google - only when needed
+_google_genai = None
+_google_types = None
+
+def _get_google_client():
+    """Lazy import and initialization of Google GenAI client."""
+    global _google_genai, _google_types
+    if _google_genai is None:
+        try:
+            from google import genai
+            from google.genai import types
+            _google_genai = genai
+            _google_types = types
+        except ImportError as e:
+            raise ImportError(
+                "Failed to import 'genai' from 'google'. "
+                "Please ensure 'google-genai' package is installed: pip install google-genai>=1.0.0. "
+                "If running in Docker, rebuild the image: docker-compose build --no-cache"
+            ) from e
+    return _google_genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 
 # Pydantic models for structured outputs
@@ -50,16 +70,24 @@ class SubwayPreferencesResponse(BaseModel):
         default_factory=list,
         description="List of subway line names (multi-word, lowercase)"
     )
+    min_distance: Optional[float] = Field(
+        None,
+        description="Minimum distance from subway in miles (for range queries)"
+    )
     max_distance: Optional[float] = Field(
         None,
         description="Maximum distance from subway in miles"
     )
 
 
-async def parse_amenities(user_query: str) -> List[str]:
+async def parse_amenities(user_query: str, provider: Literal["google", "openai"] = "google") -> List[str]:
     """
     Extract amenity requirements from user query and map to canonical amenity list.
     Uses Pydantic-enforced structured output for robust parsing.
+    
+    Args:
+        user_query: The user's search query
+        provider: Which LLM provider to use ('google' or 'openai'), default 'google'
     
     Returns:
         List of canonical amenity strings from AMENITIES list
@@ -86,27 +114,36 @@ Rules:
 
 User query: "{user_query}"
 
-Extract amenities:"""
-
-    #messages = [{"role": "user", "content": prompt}]
+Extract amenities and return ONLY valid JSON matching this schema:
+{{
+  "amenities": ["amenity1", "amenity2", ...]
+}}"""
 
     try:
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-        # Run synchronously in a thread so async code can await
-        response = client.models.generate_content(
+        if provider == "google":
+            client = _get_google_client()
+            response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                system_instruction ="""You are an expert at extracting structured data from user queries.
-                You always respond with valid JSON that adheres to the provided schema.""",
-                response_mime_type="application/json",
-                response_schema= AmenitiesResponse,
+                config=_google_types.GenerateContentConfig(
+                    system_instruction="""You are an expert at extracting structured data from user queries.
+                    You always respond with valid JSON that adheres to the provided schema.""",
+                    response_mime_type="application/json",
+                    response_schema=AmenitiesResponse,
                 ),
             )
-
-        # `response.parsed` is already a NeighborhoodsResponse object
-        parsed = response.parsed
+            parsed = response.parsed
+        else:  # openai
+            response = openai_client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert at extracting structured data from user queries. You always respond with valid JSON that adheres to the provided schema."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=AmenitiesResponse,
+                temperature=0
+            )
+            parsed = response.choices[0].message.parsed
         
         # Validate: only keep items that are in the canonical list
         validated = [a for a in parsed.amenities if a in AMENITIES]
@@ -141,10 +178,14 @@ def _fallback_parse_amenities(user_query: str) -> List[str]:
     return list(found)
 
 
-async def parse_neighborhoods(user_query: str) -> List[str]:
+async def parse_neighborhoods(user_query: str, provider: Literal["google", "openai"] = "google") -> List[str]:
     """
     Extract neighborhood preferences from user query and map to canonical neighborhood list.
     Uses Pydantic-enforced structured output. Handles landmarks (NYU -> East Village).
+    
+    Args:
+        user_query: The user's search query
+        provider: Which LLM provider to use ('google' or 'openai'), default 'google'
     
     Returns:
         List of canonical neighborhood strings from NEIGHBORHOODS list
@@ -172,27 +213,36 @@ Rules:
 
 User query: "{user_query}"
 
-Extract neighborhoods:"""
-
-    #messages = [{"role": "user", "content": prompt}]
+Extract neighborhoods and return ONLY valid JSON matching this schema:
+{{
+  "neighborhoods": ["neighborhood1", "neighborhood2", ...]
+}}"""
 
     try:
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-        # Run synchronously in a thread so async code can await
-        response = client.models.generate_content(
+        if provider == "google":
+            client = _get_google_client()
+            response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                system_instruction ="""You are an expert at extracting structured data from user queries.
-                You always respond with valid JSON that adheres to the provided schema.""",
-                response_mime_type="application/json",
-                response_schema= NeighborhoodsResponse,
+                config=_google_types.GenerateContentConfig(
+                    system_instruction="""You are an expert at extracting structured data from user queries.
+                    You always respond with valid JSON that adheres to the provided schema.""",
+                    response_mime_type="application/json",
+                    response_schema=NeighborhoodsResponse,
                 ),
             )
-
-        # `response.parsed` is already a NeighborhoodsResponse object
-        parsed = response.parsed
+            parsed = response.parsed
+        else:  # openai
+            response = openai_client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert at extracting structured data from user queries. You always respond with valid JSON that adheres to the provided schema."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=NeighborhoodsResponse,
+                temperature=0
+            )
+            parsed = response.choices[0].message.parsed
         
         # Validate
         validated = [n for n in parsed.neighborhoods if n in NEIGHBORHOODS]
@@ -228,10 +278,14 @@ def _fallback_parse_neighborhoods(user_query: str) -> List[str]:
     return list(found)
 
 
-async def parse_subway_preferences(user_query: str) -> Dict[str, Any]:
+async def parse_subway_preferences(user_query: str, provider: Literal["google", "openai"] = "google") -> Dict[str, Any]:
     """
     Extract subway route/line preferences and distance constraints.
     Uses Pydantic-enforced structured output.
+    
+    Args:
+        user_query: The user's search query
+        provider: Which LLM provider to use ('google' or 'openai'), default 'google'
     
     Returns:
         Dict with keys:
@@ -245,46 +299,63 @@ CANONICAL ROUTES: {', '.join(SUBWAY_ROUTES)}
 CANONICAL LINES: {', '.join(SUBWAY_LINES)}
 
 EXAMPLES:
-- "near F train" → routes=["f"], max_distance=null
-- "within 0.5 miles of 1 train" → routes=["1"], max_distance=0.5
-- "close to A/C/E" → routes=["a","c","e"], max_distance=null
-- "on Lexington line" → lines=["lexington"], max_distance=null
-- "within 10 min walk of subway" → routes=[], lines=[], max_distance=0.5
+- "near F train" → routes=["f"], min_distance=null, max_distance=null
+- "within 0.5 miles of 1 train" → routes=["1"], min_distance=null, max_distance=0.5
+- "close to A/C/E" → routes=["a","c","e"], min_distance=null, max_distance=null
+- "on Lexington line" → lines=["lexington"], min_distance=null, max_distance=null
+- "within 10 min walk of subway" → routes=[], lines=[], min_distance=null, max_distance=0.5
+- "1-2 miles from subway lines" → routes=[], lines=[], min_distance=1.0, max_distance=2.0
+- "roughly 1-2 miles from the A train" → routes=["a"], min_distance=1.0, max_distance=2.0
+- "between 0.5 and 1 mile from F" → routes=["f"], min_distance=0.5, max_distance=1.0
 
 Rules:
 1. Routes: single char/number (lowercase)
 2. Lines: multi-word (lowercase)
 3. Distance: miles (0.5 mi ≈ 10 min walk, 0.3 mi ≈ 5 min)
-4. "close to subway" without route → empty routes/lines
+4. Distance ranges: extract both min_distance and max_distance when specified
+5. "close to subway" without route → empty routes/lines, max_distance=0.5
 
 User query: "{user_query}"
 
-Extract subway preferences:"""
-
-    #messages = [{"role": "user", "content": prompt}]
+Extract subway preferences and return ONLY valid JSON matching this schema:
+{{
+  "routes": ["route1", "route2", ...],
+  "lines": ["line1", "line2", ...],
+  "min_distance": 0.5,
+  "max_distance": 1.0
+}}"""
 
     try:
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-        # Run synchronously in a thread so async code can await
-        response = client.models.generate_content(
+        if provider == "google":
+            client = _get_google_client()
+            response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                system_instruction ="""You are an expert at extracting structured data from user queries.
-                You always respond with valid JSON that adheres to the provided schema.""",
-                response_mime_type="application/json",
-                response_schema= SubwayPreferencesResponse,
+                config=_google_types.GenerateContentConfig(
+                    system_instruction="""You are an expert at extracting structured data from user queries.
+                    You always respond with valid JSON that adheres to the provided schema.""",
+                    response_mime_type="application/json",
+                    response_schema=SubwayPreferencesResponse,
                 ),
             )
-
-        # `response.parsed` is already a NeighborhoodsResponse object
-        parsed = response.parsed
+            parsed = response.parsed
+        else:  # openai
+            response = openai_client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert at extracting structured data from user queries. You always respond with valid JSON that adheres to the provided schema."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=SubwayPreferencesResponse,
+                temperature=0
+            )
+            parsed = response.choices[0].message.parsed
        
         # Validate and normalize
         result = {
             "routes": [r.lower() for r in parsed.routes if r.lower() in SUBWAY_ROUTES],
             "lines": [l.lower() for l in parsed.lines if l.lower() in SUBWAY_LINES],
+            "min_distance": parsed.min_distance,
             "max_distance": parsed.max_distance
         }
         return result
@@ -296,7 +367,7 @@ Extract subway preferences:"""
 def _fallback_parse_subway(user_query: str) -> Dict[str, Any]:
     """Regex-based fallback for subway extraction."""
     query_lower = user_query.lower()
-    
+
     # Extract routes
     routes = set()
     for route in SUBWAY_ROUTES:
@@ -310,24 +381,34 @@ def _fallback_parse_subway(user_query: str) -> Dict[str, Any]:
             if re.search(pattern, query_lower):
                 routes.add(route.lower())
                 break
-    
+
     # Extract lines
     lines = set()
     for line in SUBWAY_LINES:
         if line in query_lower:
             lines.add(line.lower())
-    
-    # Extract distance
+
+    # Extract distance (with range support)
+    min_distance = None
     max_distance = None
-    dist_match = re.search(r"within\s+(\d+(?:\.\d+)?)\s*miles?", query_lower)
-    if dist_match:
-        max_distance = float(dist_match.group(1))
-    elif "close to subway" in query_lower or "near subway" in query_lower:
-        max_distance = 0.5  # default 0.5 miles
-    
+
+    # Try to match range patterns like "1-2 miles", "between 1 and 2 miles", "roughly 1-2 miles"
+    range_match = re.search(r"(?:between\s+)?(\d+(?:\.\d+)?)\s*(?:and|-|to)\s*(\d+(?:\.\d+)?)\s*miles?", query_lower)
+    if range_match:
+        min_distance = float(range_match.group(1))
+        max_distance = float(range_match.group(2))
+    else:
+        # Try single distance with "within" or "under"
+        dist_match = re.search(r"(?:within|under|less than)\s+(\d+(?:\.\d+)?)\s*miles?", query_lower)
+        if dist_match:
+            max_distance = float(dist_match.group(1))
+        elif "close to subway" in query_lower or "near subway" in query_lower:
+            max_distance = 0.5  # default 0.5 miles
+
     return {
         "routes": list(routes),
         "lines": list(lines),
+        "min_distance": min_distance,
         "max_distance": max_distance
     }
 
@@ -431,15 +512,17 @@ async def apply_post_retrieval_filters(
     """
 
     # --- Parse filters if not provided ---
+    # Note: provider parameter would need to be passed through from rag_pipeline
+    # For now, defaulting to 'google' for backward compatibility
     if amenities is None:
-        amenities = await parse_amenities(user_query)
+        amenities = await parse_amenities(user_query, provider="google")
     if neighborhoods is None:
-        neighborhoods = await parse_neighborhoods(user_query)
+        neighborhoods = await parse_neighborhoods(user_query, provider="google")
     if subway_prefs is None:
-        subway_prefs = await parse_subway_preferences(user_query)
+        subway_prefs = await parse_subway_preferences(user_query, provider="google")
 
     ## --- Build filter conditions ---
-    
+
     # For now, no additional hard filters – everything is soft post-processing
     soft_filters = []
 
@@ -452,8 +535,9 @@ async def apply_post_retrieval_filters(
             soft_filters.append({"subway_routes": {"$in": subway_prefs["routes"]}})
         if subway_prefs.get("lines"):
             soft_filters.append({"subway_lines": {"$in": subway_prefs["lines"]}})
-        if subway_prefs.get("max_distance") is not None:
-            soft_filters.append({"subway_min_distance": {"$lte": subway_prefs["max_distance"]}})
+        # Handle distance constraints (ranges supported)
+        if subway_prefs.get("min_distance") is not None or subway_prefs.get("max_distance") is not None:
+            soft_filters.append({"subway_distance_range": subway_prefs})
 
     def match_condition(value, condition):
         if not isinstance(condition, dict):
@@ -490,16 +574,90 @@ async def apply_post_retrieval_filters(
             if key == "$or":
                 if not any(matches_filter(metadata, sub_cond) for sub_cond in condition):
                     return False
+            elif key == "subway_distance_range":
+                # Special handling for subway distance range filtering
+                if not matches_subway_distance_range(metadata, condition):
+                    return False
             else:
                 if key not in metadata or not match_condition(metadata[key], condition):
                     return False
         return True
 
+    def matches_subway_distance_range(metadata: Dict[str, Any], prefs: Dict[str, Any]) -> bool:
+        """
+        Check if listing matches subway distance preferences.
+        Supports filtering by specific routes/lines with distance ranges.
+
+        Args:
+            metadata: Listing metadata from Pinecone
+            prefs: Dict with keys: routes, lines, min_distance, max_distance
+
+        Returns:
+            True if listing matches distance constraints
+        """
+        min_dist = prefs.get("min_distance")
+        max_dist = prefs.get("max_distance")
+        routes = prefs.get("routes", [])
+        lines = prefs.get("lines", [])
+
+        # Get route_distances from metadata (dict of {route: distance})
+        route_distances = metadata.get("route_distances", {})
+        if not route_distances:
+            # Fallback to subway_min_distance if route_distances not available
+            min_distance = metadata.get("subway_min_distance")
+            if min_distance is None:
+                return False
+            # Check if min_distance falls within range
+            # Note: min_dist check rejects listings TOO CLOSE (edge case for noise avoidance)
+            if min_dist is not None and min_distance < min_dist:
+                return False
+            if max_dist is not None and min_distance > max_dist:
+                return False
+            return True
+
+        # If specific routes are specified, check those routes
+        if routes:
+            matching_distances = [route_distances.get(r) for r in routes if r in route_distances]
+            if not matching_distances:
+                return False
+            # Use the closest matching route for distance check
+            closest = min(matching_distances)
+            if min_dist is not None and closest < min_dist:
+                return False  # Too close (rare case)
+            if max_dist is not None and closest > max_dist:
+                return False  # Too far
+            return True
+
+        # If specific lines are specified (less common), check metadata subway_lines
+        # and use the overall min distance (approximation)
+        if lines:
+            listing_lines = metadata.get("subway_lines", [])
+            if not any(line in listing_lines for line in lines):
+                return False
+
+        # No specific routes/lines, use overall min distance
+        all_distances = list(route_distances.values())
+        if not all_distances:
+            return False
+        closest = min(all_distances)
+        if min_dist is not None and closest < min_dist:
+            return False  # Too close (rare edge case)
+        if max_dist is not None and closest > max_dist:
+            return False  # Too far
+        return True
+
     output = []
 
     for match in matches:
-        metadata = match.metadata
-        pinecone_score = getattr(match, "score", 0)
+        # Handle both dict format (from Redis) and object format (from Pinecone)
+        if isinstance(match, dict):
+            metadata = match.get("metadata", {})
+            pinecone_score = match.get("score", 0)
+            match_id = match.get("id")
+        else:
+            metadata = match.metadata
+            pinecone_score = getattr(match, "score", 0)
+            match_id = getattr(match, "id", None)
 
         # Hard filters gate (currently empty unless set above)
         if hard_filters and not matches_filter(metadata, hard_filters):
@@ -510,7 +668,7 @@ async def apply_post_retrieval_filters(
         combined_score = pinecone_score + (boost_score * boost_weight)
 
         output.append({
-            "id": getattr(match, "id", None),
+            "id": match_id,
             "metadata": metadata,
             "pinecone_score": pinecone_score,
             "boost_score": boost_score,

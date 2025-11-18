@@ -12,8 +12,15 @@ def score_listing(match: Any, criteria: Dict[str, Any]) -> Tuple[float, List[str
     - amenities: [..]
     - neighborhoods: [..]
     - subway: {"routes": [...], "lines": [...], "max_distance": float|None}
+    
+    Args:
+        match: Can be either a dict with "metadata" key or an object with .metadata attribute
     """
-    md = match.metadata
+    # Handle both dict format (from Redis) and object format (from Pinecone)
+    if isinstance(match, dict):
+        md = match.get("metadata", {})
+    else:
+        md = match.metadata
     score = 0.0
     compromises: List[str] = []
 

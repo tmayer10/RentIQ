@@ -7,7 +7,7 @@ from vectorstore import splade_encode, dense_model, get_index, INDEX_DIM
 
 load_dotenv()
 
-BATCH_SIZE = 100
+BATCH_SIZE = 500
 
 def ingest_listings():
     rows = fetch_listings()
@@ -54,14 +54,28 @@ def ingest_listings():
         neighborhood = neighborhood.lower() if neighborhood else "Not available"
 
         # --- Subway distances map ---
+        # Build detailed mapping of line_route to distance (e.g., "broadway_1": 0.15)
         subway_dist_map = {}
+        route_distances = {}  # Separate map for per-route distances
+
         if subway_lines and subway_routes and subway_distances:
             for line, route, dist in zip(subway_lines, subway_routes, subway_distances):
                 if line and route and dist is not None:
+                    # Combined line_route key
                     key = f"{line.lower()}_{route.lower()}"
                     subway_dist_map[key] = float(dist)
 
+                    # Track minimum distance per route
+                    route_lower = route.lower()
+                    if route_lower not in route_distances:
+                        route_distances[route_lower] = float(dist)
+                    else:
+                        route_distances[route_lower] = min(route_distances[route_lower], float(dist))
+
+        # Create list of "line_route:distance" for storage
         subway_dist_list = [f"{key}:{dist}" for key, dist in subway_dist_map.items()]
+
+        # Calculate minimum distance to ANY subway
         subway_min_distance = min(subway_dist_map.values()) if subway_dist_map else None
 
         # --- Metadata ---
@@ -82,7 +96,8 @@ def ingest_listings():
             "subway_lines": [line.lower() for line in subway_lines if line],
             "subway_routes": [route.lower() for route in subway_routes if route],
             "subway_min_distance": subway_min_distance,
-            # You can enable subway_distances later for numeric filtering
+            "subway_distances": subway_dist_list,  # NEW: Store detailed distance mappings
+            "route_distances": route_distances,    # NEW: Store per-route minimum distances
             "description": description
         })
 

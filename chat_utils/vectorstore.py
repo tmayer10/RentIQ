@@ -87,7 +87,14 @@ def hybrid_search_raw(query_text: str, alpha: float = 0.5, top_k: int = 20, filt
 
 def rerank_results(query: str, matches):
     """Rerank matches using BGE Reranker."""
-    docs = [m.metadata.get("description", "") for m in matches]
+    # Handle both dict format (from Redis) and object format (from Pinecone)
+    docs = []
+    for m in matches:
+        if isinstance(m, dict):
+            md = m.get("metadata", {})
+        else:
+            md = m.metadata
+        docs.append(md.get("description", ""))
     pairs = [(query, doc) for doc in docs]
 
     inputs = rerank_tokenizer(pairs, padding=True, truncation=True, return_tensors="pt")
@@ -117,8 +124,14 @@ def hybrid_search(query_text: str, alpha: float = 0.5, top_k: int = 20, filters:
 
     # Final display
     for match in matches[:5]:  # show top 5 after rerank
-        md = match.metadata
-        print(f"[Score: {match.score:.4f}] ID: {md.get('listing_id')}, "
+        # Handle both dict format (from Redis) and object format (from Pinecone)
+        if isinstance(match, dict):
+            md = match.get("metadata", {})
+            score = match.get("score", 0.0)
+        else:
+            md = match.metadata
+            score = getattr(match, "score", 0.0)
+        print(f"[Score: {score:.4f}] ID: {md.get('listing_id')}, "
               f"${md.get('price')}, {md.get('bedrooms')}BR/{md.get('bathrooms')}BA, "
               f"Neighborhood{md.get('neighborhood')}, Borough{md.get('borough')}")
         print(f"Amenities: {md.get('amenities')}")

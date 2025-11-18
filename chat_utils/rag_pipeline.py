@@ -13,21 +13,77 @@ import asyncio
 from response_router import decide_response_type
 from filters_change import have_filters_changed
 from scorer import score_listings
+from pydantic import BaseModel, Field
+from typing import List, Optional
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
+# Pydantic models for structured listing recommendations
+class ListingRecommendation(BaseModel):
+    """Structured representation of a single listing recommendation."""
+    listing_id: str = Field(description="The listing ID (e.g., '4883693')")
+    price: float = Field(description="The monthly rent price")
+    bedrooms: int = Field(description="Number of bedrooms")
+    bathrooms: float = Field(description="Number of bathrooms")
+    neighborhood: str = Field(description="Neighborhood name")
+    amenities: List[str] = Field(default_factory=list, description="List of amenities")
+    summary: str = Field(description="Brief summary explaining why this listing matches the user's needs")
+
+
+class StructuredListingResponse(BaseModel):
+    """Structured response for new search queries with ranked listings."""
+    listings: List[ListingRecommendation] = Field(
+        default_factory=list,
+        description="Ranked list of listing recommendations from most to least relevant"
+    )
+    final_recommendation: Optional[str] = Field(
+        None,
+        description="Brief final recommendation or summary (optional)"
+    )
+
+
+class ConversationalResponse(BaseModel):
+    """Structured response for conversational follow-ups."""
+    response: str = Field(description="Natural conversational response to the user's query")
+    referenced_listing_ids: List[str] = Field(
+        default_factory=list,
+        description="List of listing IDs mentioned in the response (if any)"
+    )
+
+
 def format_listings(matches):
-    """Convert matches from Pinecone into a neat text block for LLM context."""
+    """Convert matches from Pinecone into a neat text block for LLM context.
+    
+    Handles both dict format (from Redis) and object format (from Pinecone).
+    """
     formatted = []
     for rank, m in enumerate(matches, start=1):
-        md = m['metadata']
+        # Handle both dict format and object format
+        if isinstance(m, dict):
+            md = m.get("metadata", {})
+        else:
+            md = m.metadata
+
+        # Format subway information
+        subway_text = ""
+        route_distances = md.get('route_distances', {})
+        if route_distances:
+            # Sort routes by distance and show top 3 closest
+            sorted_routes = sorted(route_distances.items(), key=lambda x: x[1])[:3]
+            subway_parts = [f"{route.upper()} train ({dist:.2f} mi)" for route, dist in sorted_routes]
+            subway_text = f"   Subway: {', '.join(subway_parts)}\n"
+        elif md.get('subway_info'):
+            # Fallback to subway_info string if route_distances not available
+            subway_text = f"   Subway: {md.get('subway_info')}\n"
+
         formatted.append(
             f"{rank}. ID: {md.get('listing_id')}\n"
             f"   Price: ${md.get('price')}\n"
             f"   Bedrooms: {md.get('bedrooms')}, Bathrooms: {md.get('bathrooms')}\n"
             f"   Neighborhood: {md.get('neighborhood')}, Borough: {md.get('borough')}\n"
+            f"{subway_text}"
             f"   Amenities: {', '.join(md.get('amenities', []))}\n"
             f"   Description: {md.get('description')}\n"
         )
@@ -63,6 +119,7 @@ async def rag_search(
     is_first_turn: bool = False,
     previous_filters: dict = None,
     previous_matches=None,
+    filter_provider: str = "google",
 ):
     """Full RAG with optional chat history.
 
@@ -76,7 +133,7 @@ async def rag_search(
     standalone_query = rewrite_query(user_query, chat_history or [])
 
     # Step 1: Extract simple Pinecone pre-filters (price, bed, bath, sqft, zipcode ONLY)
-    pinecone_filters = await extract_pinecone_filters(standalone_query)
+    pinecone_filters = await extract_pinecone_filters(standalone_query, provider=filter_provider)
     
     # Step 1.5: Decide response type (general vs index_query)
     response_type = decide_response_type(user_query)
@@ -87,9 +144,9 @@ async def rag_search(
     # Step 2: Parse post-retrieval filter criteria (neighborhoods, amenities, subway) concurrently
     try:
         amenities, neighborhoods, subway_prefs = await asyncio.gather(
-            parse_amenities(standalone_query),
-            parse_neighborhoods(standalone_query),
-            parse_subway_preferences(standalone_query)
+            parse_amenities(standalone_query, provider=filter_provider),
+            parse_neighborhoods(standalone_query, provider=filter_provider),
+            parse_subway_preferences(standalone_query, provider=filter_provider)
         )
 
         # Defaults if any come back as None
@@ -106,9 +163,15 @@ async def rag_search(
 
     # Step 3: Retrieve from Pinecone using simple pre-filters (fetch more for post-filtering)
     # Reuse prior matches if response is general and filters didn't change
+    print(f"[DECISION] response_type={response_type}, filters_changed={filters_changed}, is_new_search={is_new_search}")
+
+    matches_reused = False
     if response_type == "general" and not filters_changed and previous_matches:
+        print(f"[ACTION] REUSING {len(previous_matches)} previous matches")
         raw_matches = previous_matches
+        matches_reused = True
     else:
+        print(f"[ACTION] RETRIEVING new matches from Pinecone")
         # Adaptive over-fetch: if we have both price and bedrooms, fetch less
         has_strong_filters = bool(pinecone_filters.get("price")) and bool(pinecone_filters.get("bedrooms"))
         retrieval_k = top_k * (2 if has_strong_filters else 3)
@@ -166,39 +229,72 @@ async def rag_search(
     # Step 5: Trim to requested top_k after filtering
     matches = matches[:top_k]
     
-    # Build clarification if results are sparse
+    # Build clarification only when zero results
     clarification = None
-    if len(matches) < top_k // 2:
+    if len(matches) == 0:
         missing = []
         if not pinecone_filters:
             missing.append("budget or bedroom count")
         if not neighborhoods and not amenities and not subway_prefs.get("routes"):
             missing.append("preferred neighborhood or subway line")
         if missing:
-            clarification = f"I found {len(matches)} matches. For better results, could you specify: {', '.join(missing)}?"
+            clarification = f"I found no matches. Could you try specifying: {', '.join(missing)}?"
+        else:
+            clarification = "I found no matches with those criteria. Try expanding your budget, increasing bedroom count, or exploring different neighborhoods."
 
     # Step 6: Build current-turn retrieval context (include score/compromises inline)
+    # Helper function to extract metadata and score from either dict or object format
+    def get_match_metadata(match):
+        """Extract metadata from match (handles both dict and object formats)."""
+        if isinstance(match, dict):
+            return match.get("metadata", {})
+        return match.metadata
+    
+    def get_match_score(match):
+        """Extract score from match (handles both dict and object formats)."""
+        if isinstance(match, dict):
+            return match.get("score", 0.0)
+        return match.score
+    
     # Create a quick map for compromises
     id_to_score = {}
     id_to_comp = {}
     for m, s, comp in scored:
-        mid = m.metadata.get("listing_id")
+        md = get_match_metadata(m)
+        mid = md.get("listing_id")
         id_to_score[mid] = s
         id_to_comp[mid] = comp
 
     def format_with_scores(ms):
         lines = []
         for rank, m in enumerate(ms, start=1):
-            md = m.metadata
+            md = get_match_metadata(m)
             lid = md.get('listing_id')
             score = id_to_score.get(lid)
-            retrieval_score = m.score
+            retrieval_score = get_match_score(m)
             comp = id_to_comp.get(lid) or []
+            
+            # Format subway information
+            subway_text = ""
+            route_distances = md.get('route_distances', {})
+            if route_distances:
+                # Sort routes by distance and show top 3 closest
+                sorted_routes = sorted(route_distances.items(), key=lambda x: x[1])[:3]
+                subway_parts = [f"{route.upper()} train ({dist:.2f} mi)" for route, dist in sorted_routes]
+                subway_text = f"   Subway: {', '.join(subway_parts)}\n"
+            elif md.get('subway_info'):
+                # Fallback to subway_info string if route_distances not available
+                subway_text = f"   Subway: {md.get('subway_info')}\n"
+            elif md.get('subway_min_distance') is not None:
+                # Fallback to minimum distance if available
+                subway_text = f"   Subway: {md.get('subway_min_distance'):.2f} mi from nearest station\n"
+            
             lines.append(
                 f"{rank}. ID: {lid} (score: {score}; retrieval score: {retrieval_score})\n"
                 f"   Price: ${md.get('price')}\n"
                 f"   Bedrooms: {md.get('bedrooms')}, Bathrooms: {md.get('bathrooms')}\n"
                 f"   Neighborhood: {md.get('neighborhood')}, Borough: {md.get('borough')}\n"
+                f"{subway_text}"
                 f"   Amenities: {', '.join(md.get('amenities', []))}\n"
                 f"   Compromises: {', '.join(comp) if comp else 'None'}\n"
             )
@@ -237,39 +333,115 @@ Here are the top {top_k} listings retrieved from our database for this turn:
 
 TASK:
 - Provide a ranked list from most to least relevant.
-- For each listing: summarize key selling points and match with the user's needs (from history and this turn).
-- Be concise but informative.
-- End with a brief final recommendation.
-- If this is an UPDATED search (user changed requirements), acknowledge what changed.
+- For each listing: include the exact listing_id, price, bedrooms, bathrooms, neighborhood, amenities, and a summary explaining why it matches the user's needs.
+- If subway distances are provided in the listing data, MENTION them in your summary (e.g., "0.15 miles from the 1 train").
+- If the user asks for information in a TABLE format (e.g., "give me X in a table"), create a properly formatted markdown table with the requested data.
+- When creating tables with subway distances, include columns for Listing ID and each subway route with its distance.
+- Be concise but informative in the summaries.
+- Optionally include a final_recommendation with overall guidance.
+- If this is an UPDATED search (user changed requirements), acknowledge what changed in the final_recommendation.
 
-Output only the recommendation list and summary.
+IMPORTANT: Use the exact listing_id values from the context above. Include all amenities from the listing data. When subway access is mentioned in the query or available in the data, highlight it prominently. Subway distance information is available in the listing data above - use it when answering questions about subway proximity.
 """
+        # Use structured output for new searches
+        use_structured = True
+        schema_model = StructuredListingResponse
     else:
+        # Determine if matches were reused (same listings from previous turn)
+        reuse_note = ""
+        if matches_reused:
+            reuse_note = f"""
+IMPORTANT CONTEXT: The listings shown below are the SAME listings from the previous turn (they were reused because your query is a follow-up question, not a new search). When the user refers to "these listings" or "from these listings", they are referring to the listings shown below.
+"""
+        
         current_user_prompt = f"""
 You are continuing an ongoing conversation. Answer naturally and concisely while grounding strictly in the retrieved listings for this turn.
 
 User's latest message: "{user_query}"
 Rewritten standalone query: "{standalone_query}"
-
-Top {top_k} listings retrieved for this turn:
+{reuse_note}
+Top {top_k} listings{' (same as previous turn)' if matches_reused else ' retrieved for this turn'}:
 {context_block}
 
 Guidelines:
 - Keep a conversational tone. Avoid rigid ranking formatting unless explicitly requested.
-- Reference prior preferences when relevant. If a referred listing is not in the current results, say so and suggest refining filters.
+- If the user asks for information in a TABLE format (e.g., "give me X in a table"), create a properly formatted markdown table with the requested data.
+- When creating tables with subway distances, include columns for Listing ID and each subway route with its distance.
+- {"IMPORTANT: These are the SAME listings you showed in your previous response. When the user asks about 'these listings' or refers to listings from the previous turn, they mean the listings shown above. " if matches_reused else ""}Reference prior preferences when relevant. If a referred listing is not in the current results, say so and suggest refining filters.
+- If the user asks about subway access or distances, highlight those details from the listing data. Subway distance information is available in the listing data above - use it when answering questions about subway proximity.
 - Provide a succinct, helpful answer (2–5 sentences) and, when appropriate, suggest the next best question or adjustment.
+- If you mention any listing IDs, include them in referenced_listing_ids.
 """
+        # Use structured output for conversational responses too
+        use_structured = True
+        schema_model = ConversationalResponse
 
     messages = [system_msg]
     messages.extend(history_messages)
     messages.append({"role": "user", "content": current_user_prompt})
 
-    # Step 8: Call LLM
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0.3,
-    )
-    llm_output = response.choices[0].message.content.strip()
+    # Step 8: Call LLM with structured output
+    try:
+        completion = await call_llm_with_limit(
+            messages=messages,
+            model_name="gpt-4o-mini",
+            schema_model=schema_model if use_structured else None,
+            temperature=0.3
+        )
+        
+        if use_structured:
+            parsed = completion.choices[0].message.parsed
+            # Convert structured output to formatted text for display
+            if isinstance(parsed, StructuredListingResponse):
+                llm_output = _format_structured_listings(parsed)
+                structured_data = parsed
+            elif isinstance(parsed, ConversationalResponse):
+                llm_output = parsed.response
+                structured_data = {"referenced_listing_ids": parsed.referenced_listing_ids}
+            else:
+                # Fallback to text content if parsing failed
+                llm_output = completion.choices[0].message.content.strip()
+                structured_data = None
+        else:
+            llm_output = completion.choices[0].message.content.strip()
+            structured_data = None
+    except Exception as e:
+        print(f"[WARN] Structured output failed: {e}. Falling back to text generation.")
+        # Fallback to regular text generation
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.3,
+        )
+        llm_output = response.choices[0].message.content.strip()
+        structured_data = None
 
-    return llm_output, matches, clarification, pinecone_filters
+    # Step 9: Package complete filter state (hard + soft filters)
+    filter_state = {
+        "hard": pinecone_filters,
+        "amenities": amenities,
+        "neighborhoods": neighborhoods,
+        "subway": subway_prefs
+    }
+
+    return llm_output, matches, clarification, filter_state, structured_data
+
+
+def _format_structured_listings(parsed: StructuredListingResponse) -> str:
+    """Convert structured listing response to formatted text for display."""
+    lines = []
+    
+    for listing in parsed.listings:
+        lines.append(f"ID: {listing.listing_id}")
+        lines.append(f"Price: ${listing.price}")
+        lines.append(f"Bedrooms: {listing.bedrooms}, Bathrooms: {listing.bathrooms}")
+        lines.append(f"Neighborhood: {listing.neighborhood}")
+        lines.append(f"Amenities: {', '.join(listing.amenities)}")
+        lines.append(f"Summary: {listing.summary}")
+        lines.append("")  # Empty line between listings
+    
+    if parsed.final_recommendation:
+        lines.append(parsed.final_recommendation)
+    
+    return "\n".join(lines)
