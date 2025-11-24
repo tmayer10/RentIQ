@@ -32,3 +32,7 @@ env/
 # Front-end packages
 /node_modules
 package-lock.json
+
+# Large binary files
+*.zip
+backend/awscliv2.zip
